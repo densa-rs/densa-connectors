@@ -1,0 +1,28 @@
+[package]
+name = "densa-datafusion"
+description = "SQL over Arrow with Apache DataFusion, results handed over as record batches from a background runtime: for densa and any Arrow consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+# DataFusion 55's own minimum; the other connectors keep the workspace's.
+rust-version = "1.94"
+repository.workspace = true
+readme.workspace = true
+keywords = ["arrow", "sql", "datafusion", "query", "parquet"]
+categories = ["database", "data-structures"]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-ipc.workspace = true
+arrow-schema.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+arrow-select.workspace = true
+parquet.workspace = true
+
+[lints]
+workspace = true

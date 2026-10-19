@@ -10,12 +10,8 @@
 use std::error::Error;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow_array::{
-    ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
-};
 use densa_arrow::LiveModel;
 use densa_data::LiveTable;
 use densa_files::{Loader, OpenOptions};
@@ -196,84 +192,20 @@ fn grouped(n: u64) -> String {
 /// Writes a million web requests (a service log) to a Parquet file in the temporary folder,
 /// returning its path.
 fn write_sample() -> Result<PathBuf, Box<dyn Error>> {
-    const ROWS: i64 = 1_000_000;
     const BATCH: i64 = 65_536;
-    const SERVICES: [&str; 6] = [
-        "gateway", "auth", "catalog", "checkout", "search", "storage",
-    ];
-    const PATHS: [&str; 6] = ["/", "/login", "/items", "/cart", "/search", "/files"];
-    const METHODS: [&str; 4] = ["GET", "GET", "POST", "PUT"];
     let name = format!("densa-sample-requests-{}.parquet", std::process::id());
     let path = std::env::temp_dir().join(name);
-    let batch = |start: i64| -> Result<RecordBatch, Box<dyn Error>> {
-        let ids: Vec<i64> = (start..(start + BATCH).min(ROWS)).collect();
-        // Lossless: small indices.
-        let pick = |i: i64, n: i64| (i * 7_919 % n) as usize;
-        let status = |i: i64| match i % 97 {
-            0 => 500,
-            1..=3 => 404,
-            _ => 200,
-        };
-        // Whole hundredths, so values print short.
-        let millis = |i: i64| (200 + (i * 7_919) % 16_000) as f64 / 100.0;
-        Ok(RecordBatch::try_from_iter([
-            (
-                "request",
-                Arc::new(Int64Array::from(ids.clone())) as ArrayRef,
-            ),
-            (
-                "time",
-                Arc::new(
-                    TimestampMillisecondArray::from_iter_values(
-                        ids.iter().map(|&i| 1_792_368_000_000 + i * 37),
-                    )
-                    .with_timezone("UTC"),
-                ),
-            ),
-            (
-                "service",
-                Arc::new(StringArray::from_iter_values(
-                    ids.iter().map(|&i| SERVICES[pick(i, 6)]),
-                )),
-            ),
-            (
-                "method",
-                Arc::new(StringArray::from_iter_values(
-                    ids.iter().map(|&i| METHODS[pick(i, 4)]),
-                )),
-            ),
-            (
-                "path",
-                Arc::new(StringArray::from_iter_values(
-                    ids.iter().map(|&i| PATHS[pick(i + 3, 6)]),
-                )),
-            ),
-            (
-                "status",
-                Arc::new(Int64Array::from_iter_values(ids.iter().map(|&i| status(i)))),
-            ),
-            (
-                "ms",
-                Arc::new(Float64Array::from_iter_values(
-                    ids.iter().map(|&i| millis(i)),
-                )),
-            ),
-            (
-                "bytes",
-                Arc::new(Int64Array::from_iter_values(
-                    ids.iter().map(|&i| 200 + i * 31 % 40_000),
-                )),
-            ),
-        ])?)
-    };
-    let first = batch(0)?;
+    let first = samples::requests(0, BATCH)?;
     let properties = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
     let mut writer = ArrowWriter::try_new(File::create(&path)?, first.schema(), Some(properties))?;
     writer.write(&first)?;
-    for start in (BATCH..ROWS).step_by(65_536) {
-        writer.write(&batch(start)?)?;
+    for start in (BATCH..samples::REQUESTS).step_by(65_536) {
+        writer.write(&samples::requests(
+            start,
+            (start + BATCH).min(samples::REQUESTS),
+        )?)?;
     }
     writer.close()?;
     Ok(path)

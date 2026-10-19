@@ -31,8 +31,12 @@ arrow-flight = { version = "60", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false, features = ["net", "rt", "time"] }
 tonic = { version = "0.14", default-features = false }
+# DataFusion 55 is built on Arrow 59: densa-datafusion moves batches between the two
+# through Arrow IPC streams. SQL, Parquet and the common function families only.
+datafusion = { version = "55", default-features = false, features = ["sql", "parquet", "datetime_expressions", "string_expressions", "unicode_expressions", "regex_expressions", "nested_expressions"] }
 # Codecs are densa-files features.
 parquet = { version = "60", default-features = false, features = ["arrow"] }
+densa-datafusion = { path = "crates/densa-datafusion", version = "0.1.0" }
 densa-files = { path = "crates/densa-files", version = "0.1.0" }
 densa-flight = { path = "crates/densa-flight", version = "0.1.0" }
 densa-ws = { path = "crates/densa-ws", version = "0.1.0" }

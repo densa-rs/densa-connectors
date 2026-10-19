@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc -p densa-files -p densa-ws -p densa-flight --no-deps --locked
+      - run: cargo doc -p densa-files -p densa-ws -p densa-flight -p densa-datafusion --no-deps --locked
 
   msrv:
     runs-on: ubuntu-latest
@@ -55,3 +55,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p densa-files -p densa-ws -p densa-flight --all-targets --locked
       - run: cargo check -p densa-ws -p densa-flight --no-default-features --all-targets --locked
+
+  msrv-datafusion:
+    # DataFusion 55 needs Rust 1.94: densa-datafusion declares it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p densa-datafusion --all-targets --locked

@@ -9,7 +9,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-arrow-array.workspace = true
 densa-arrow.workspace = true
 densa-data.workspace = true
 densa-files.workspace = true
@@ -17,6 +16,7 @@ densa-ui.workspace = true
 densa-widgets.workspace = true
 densa-window.workspace = true
 parquet.workspace = true
+samples = { path = "../samples" }
 
 [lints]
 workspace = true

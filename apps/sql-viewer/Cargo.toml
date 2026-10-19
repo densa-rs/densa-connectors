@@ -1,0 +1,23 @@
+[package]
+name = "sql-viewer"
+description = "Runs SQL with DataFusion over Parquet and CSV files and shows the result in densa's live grid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# DataFusion 55's minimum.
+rust-version = "1.94"
+repository.workspace = true
+publish = false
+
+[dependencies]
+arrow-schema.workspace = true
+densa-arrow.workspace = true
+densa-data.workspace = true
+densa-datafusion.workspace = true
+densa-ui.workspace = true
+densa-widgets.workspace = true
+densa-window.workspace = true
+samples = { path = "../samples" }
+
+[lints]
+workspace = true

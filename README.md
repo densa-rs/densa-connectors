@@ -18,6 +18,7 @@ bring large dependency trees of their own.
 | [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready |
 | [`densa-ws`](crates/densa-ws) | WebSocket streams of JSON rows or Arrow IPC as record batches: rows gathered into batches, handed over within a set delay, reconnecting with growing waits and re-sending subscriptions, TLS through rustls |
 | [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands and SQL queries, every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app |
+| [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped (needs Rust 1.94, DataFusion's minimum) |
 
 ## A file in a live table
 
@@ -124,6 +125,37 @@ WebSocket streams, which always reconnect), and failures that would repeat, such
 query, always end it. Headers go only to the service named by the URL, never to endpoints it
 places elsewhere.
 
+## SQL with DataFusion
+
+```rust
+use densa_datafusion::{Engine, QueryEvent};
+
+fn summarize() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = Engine::new()?;
+    engine.register_parquet("requests", "requests.parquet")?;
+    let mut result = engine
+        .sql("SELECT service, count(*) AS requests, avg(ms) AS ms FROM requests GROUP BY service")
+        .row_numbers("row")
+        .run(|| { /* waker.wake() */ });
+
+    // In an app, take what is ready each frame with `try_next`.
+    while let Some(event) = result.wait_next(std::time::Duration::from_secs(30)) {
+        match event {
+            QueryEvent::Schema(schema) => println!("{} columns", schema.fields().len()),
+            QueryEvent::Batch(batch) => println!("{} rows", batch.num_rows()),
+            QueryEvent::Failed { reason } => return Err(reason.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+```
+
+The engine runs queries on a tokio runtime of its own; dropping a result cancels its query.
+Queries only read: creating tables, writing files and changing settings need
+`Query::allow_changes`. DataFusion 55 is built on Arrow 59 and densa on Arrow 60: batches
+cross between the two as Arrow IPC.
+
 ## Applications
 
 `file-viewer` opens a CSV or Parquet file in densa's live grid while the file loads: rows
@@ -170,9 +202,22 @@ by a column instead of numbering them.
   <img alt="A Flight SQL result of a million web requests in densa's grid: request, time, service, method, path, status, ms, bytes and row number columns, with the row count in the status bar" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/flight-viewer.png" width="660">
 </p>
 
+`sql-viewer` runs SQL over Parquet and CSV files and shows the result in the grid; type a
+query and press Enter to run another.
+
+```
+cargo run --release -p sql-viewer -- --demo     # a million requests, summarized
+cargo run --release -p sql-viewer -- --table trips=trips.parquet --table zones=zones.csv \
+    "SELECT zone, count(*) AS trips FROM trips JOIN zones USING (zone_id) GROUP BY zone"
+```
+
+<p align="center">
+  <img alt="A DataFusion query summarizing a million web requests by service and status in densa's grid, with the SQL in a text box above and the time it took in the status bar" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/sql-viewer.png" width="660">
+</p>
+
 ## Next
 
-Query engines that already speak Arrow (DataFusion, Polars, DuckDB), then Kafka and NATS.
+DuckDB and Polars, then Kafka and NATS.
 The roadmap is at [densa.dev/roadmap](https://densa.dev/roadmap/).
 
 ## License
