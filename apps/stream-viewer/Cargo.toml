@@ -1,0 +1,22 @@
+[package]
+name = "stream-viewer"
+description = "Shows a WebSocket stream of JSON rows in densa's live grid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+arrow-schema.workspace = true
+densa-arrow.workspace = true
+densa-data.workspace = true
+densa-ui.workspace = true
+densa-widgets.workspace = true
+densa-window.workspace = true
+densa-ws.workspace = true
+tungstenite.workspace = true
+
+[lints]
+workspace = true

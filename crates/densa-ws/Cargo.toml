@@ -1,0 +1,31 @@
+[package]
+name = "densa-ws"
+description = "WebSocket streams of JSON or Arrow IPC as Arrow record batches, read on a background thread: for densa and any Arrow consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["arrow", "websocket", "streaming", "json", "realtime"]
+categories = ["network-programming", "data-structures"]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-buffer.workspace = true
+arrow-ipc.workspace = true
+arrow-json.workspace = true
+arrow-schema.workspace = true
+arrow-select.workspace = true
+tungstenite.workspace = true
+rustls = { workspace = true, optional = true }
+webpki-roots = { version = "1", optional = true }
+
+[features]
+default = ["tls"]
+# wss:// through rustls, with the Mozilla root certificates.
+tls = ["dep:rustls", "dep:webpki-roots", "tungstenite/__rustls-tls"]
+
+[lints]
+workspace = true
