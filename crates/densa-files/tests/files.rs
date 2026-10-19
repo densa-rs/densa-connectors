@@ -271,7 +271,12 @@ fn a_loader_hands_over_every_batch_in_order_and_wakes_for_each() {
     assert_eq!(ids, (0..10_000).collect::<Vec<_>>());
     assert!(loader.is_finished());
     assert!(loader.try_next().is_none());
-    // Ten batches, then the end.
+    // Ten batches, then the end. The last wake follows the end being visible (so a woken
+    // interface sees it): give it a moment.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while wakes.load(Ordering::Relaxed) < 11 && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert_eq!(wakes.load(Ordering::Relaxed), 11);
 }
 
