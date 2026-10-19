@@ -8,8 +8,8 @@ densa itself: any Arrow consumer can use them.
 Connectors live apart from densa's core crates because the formats and protocols they speak
 bring large dependency trees of their own.
 
-> **Status: 0.x, experimental.** Not on crates.io yet; densa's crates are taken from their
-> repository.
+> **Status: 0.x, experimental.** These crates are not on crates.io yet (take them from this
+> repository); the apps use densa's crates from [crates.io](https://crates.io/crates/densa).
 
 ## Crates
 
