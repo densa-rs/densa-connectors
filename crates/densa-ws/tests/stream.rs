@@ -830,3 +830,14 @@ fn a_long_arrow_ipc_stream_of_small_messages_is_never_cut_off() {
         }
     }
 }
+
+#[test]
+fn header_values_are_not_printed() {
+    let options =
+        StreamOptions::json("ws://localhost/", schema()).header("Authorization", "Bearer secret");
+    let printed = format!("{options:?}");
+    assert!(
+        printed.contains("Authorization") && !printed.contains("secret"),
+        "{printed}"
+    );
+}

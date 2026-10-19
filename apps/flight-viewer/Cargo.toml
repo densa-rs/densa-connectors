@@ -1,0 +1,28 @@
+[package]
+name = "flight-viewer"
+description = "Shows an Arrow Flight or Flight SQL result in densa's live grid as it arrives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+arrow-array.workspace = true
+arrow-flight.workspace = true
+arrow-schema.workspace = true
+densa-arrow.workspace = true
+densa-data.workspace = true
+densa-flight.workspace = true
+densa-ui.workspace = true
+densa-widgets.workspace = true
+densa-window.workspace = true
+futures.workspace = true
+# The demo service.
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
+tonic.workspace = true
+
+[lints]
+workspace = true

@@ -17,6 +17,7 @@ bring large dependency trees of their own.
 |---|---|
 | [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready |
 | [`densa-ws`](crates/densa-ws) | WebSocket streams of JSON rows or Arrow IPC as record batches: rows gathered into batches, handed over within a set delay, reconnecting with growing waits and re-sending subscriptions, TLS through rustls |
+| [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands and SQL queries, every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app |
 
 ## A file in a live table
 
@@ -86,6 +87,43 @@ reported. Arrow IPC streams may be split across binary messages in any way. A lo
 connection is opened again, and the subscriptions sent again, after a wait that doubles up
 to a limit.
 
+## A Flight SQL query in a live table
+
+```rust
+use densa_data::LiveTable;
+use densa_flight::{FlightEvent, FlightOptions};
+
+fn query() -> Result<(), Box<dyn std::error::Error>> {
+    let mut result = FlightOptions::sql("grpc+tls://flight.example.com:443", "SELECT * FROM trips")
+        .header("authorization", "Bearer <token>")
+        .row_numbers("row")
+        .connect(|| { /* waker.wake() */ })?;
+
+    // In an app, take what is ready each frame with `try_next`.
+    let mut table = None;
+    while let Some(event) = result.wait_next(std::time::Duration::from_secs(30)) {
+        match event {
+            FlightEvent::Schema(schema) => table = Some(LiveTable::new(schema, "row")?),
+            FlightEvent::Batch(batch) => {
+                if let Some(table) = table.as_mut() {
+                    table.upsert(batch)?;
+                }
+            }
+            FlightEvent::Failed { reason } => return Err(reason.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+```
+
+The schema comes first, so the table exists even for an empty result. `FlightOptions::ticket`,
+`path` and `command` ask for other kinds of data; a `DoGet` that never ends (live data) is
+read as it comes. A failure ends the result unless `FlightOptions::retry` is set (unlike
+WebSocket streams, which always reconnect), and failures that would repeat, such as a refused
+query, always end it. Headers go only to the service named by the URL, never to endpoints it
+places elsewhere.
+
 ## Applications
 
 `file-viewer` opens a CSV or Parquet file in densa's live grid while the file loads: rows
@@ -106,7 +144,9 @@ connection's state and the rate in the status bar.
 
 ```
 cargo run --release -p stream-viewer -- --demo     # a local server of 500 sensors
-cargo run --release -p stream-viewer -- wss://example.com/readings     --columns sensor:string,celsius:float,time:time --key sensor     --subscribe '{"subscribe":"readings"}'
+cargo run --release -p stream-viewer -- wss://example.com/readings \
+    --columns sensor:string,celsius:float,time:time --key sensor \
+    --subscribe '{"subscribe":"readings"}'
 ```
 
 Column types are `string`, `int`, `float`, `bool` and `time` (milliseconds since 1970).
@@ -115,9 +155,25 @@ Column types are `string`, `int`, `float`, `bool` and `time` (milliseconds since
   <img alt="A WebSocket stream of 500 sensors in densa's grid: sensor, site, celsius, humidity, ok and time columns, with the connection and rows a second in the status bar" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/stream-viewer.png" width="660">
 </p>
 
+`flight-viewer` shows a Flight or Flight SQL result in the grid as it arrives.
+
+```
+cargo run --release -p flight-viewer -- --demo     # a local service: a million requests
+cargo run --release -p flight-viewer -- grpc://localhost:32010 --sql "SELECT * FROM trips" \
+    --header 'authorization:$FLIGHT_AUTH'          # FLIGHT_AUTH="Bearer <token>"
+```
+
+`--ticket`, `--path a/b` and `--command` ask for other kinds of data; `--key COLUMN` keys rows
+by a column instead of numbering them.
+
+<p align="center">
+  <img alt="A Flight SQL result of a million web requests in densa's grid: request, time, service, method, path, status, ms, bytes and row number columns, with the row count in the status bar" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/flight-viewer.png" width="660">
+</p>
+
 ## Next
 
-Arrow Flight. The roadmap is at [densa.dev/roadmap](https://densa.dev/roadmap/).
+Query engines that already speak Arrow (DataFusion, Polars, DuckDB), then Kafka and NATS.
+The roadmap is at [densa.dev/roadmap](https://densa.dev/roadmap/).
 
 ## License
 

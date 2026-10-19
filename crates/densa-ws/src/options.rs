@@ -25,7 +25,9 @@ pub enum MessageFormat {
 
 /// How to read a WebSocket stream: [`StreamOptions::json`] or [`StreamOptions::arrow_ipc`],
 /// then the settings that differ, then [`connect`](Self::connect).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Its `Debug` output leaves header values out: they are often tokens.
+#[derive(Clone, PartialEq)]
 pub struct StreamOptions {
     pub(crate) url: String,
     pub(crate) format: MessageFormat,
@@ -128,6 +130,26 @@ impl StreamOptions {
     /// stream reports it and keeps trying.
     pub fn connect(self, wake: impl Fn() + Send + 'static) -> Result<Stream, StreamError> {
         Stream::spawn(self, wake)
+    }
+}
+
+impl fmt::Debug for StreamOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<_> = self
+            .headers
+            .iter()
+            .map(|(name, _)| format!("{name}: <hidden>"))
+            .collect();
+        f.debug_struct("StreamOptions")
+            .field("url", &self.url)
+            .field("format", &self.format)
+            .field("batch_rows", &self.batch_rows)
+            .field("max_delay", &self.max_delay)
+            .field("retry", &self.retry)
+            .field("on_connect", &self.on_connect)
+            .field("headers", &headers)
+            .field("max_message", &self.max_message)
+            .finish()
     }
 }
 

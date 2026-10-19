@@ -1,0 +1,36 @@
+[package]
+name = "densa-flight"
+description = "Arrow Flight and Flight SQL results as Arrow record batches, read on a background thread: for densa and any Arrow consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["arrow", "flight", "sql", "grpc", "streaming"]
+categories = ["network-programming", "database"]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-flight.workspace = true
+arrow-schema.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+prost = { version = "0.14", default-features = false, optional = true }
+
+[dev-dependencies]
+prost = { version = "0.14", default-features = false }
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
+
+[features]
+default = ["tls", "sql"]
+# grpc+tls:// and https:// through rustls on the ring backend, with the Mozilla roots.
+tls = ["arrow-flight/tls-ring", "arrow-flight/tls-webpki-roots"]
+# Flight SQL queries (FlightOptions::sql).
+sql = ["arrow-flight/flight-sql", "dep:prost"]
+
+[lints]
+workspace = true

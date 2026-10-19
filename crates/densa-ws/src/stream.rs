@@ -98,7 +98,9 @@ impl Stream {
                 };
                 if catch_unwind(AssertUnwindSafe(|| reader.run())).is_err() {
                     let reason = "the reading thread panicked".to_owned();
-                    let _ = last_word.try_send(StreamEvent::Stopped { reason });
+                    // Blocks while the queue is full: the taker must learn why it ended.
+                    // It fails at once if the stream was dropped.
+                    let _ = last_word.send(StreamEvent::Stopped { reason });
                 }
                 drop(last_word);
                 let _ = catch_unwind(AssertUnwindSafe(&wake));
