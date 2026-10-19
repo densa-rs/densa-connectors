@@ -1,0 +1,30 @@
+[package]
+name = "densa-files"
+description = "CSV and Parquet files as Arrow record batches, read on a background thread: for densa and any Arrow consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["arrow", "parquet", "csv", "streaming", "data"]
+categories = ["data-structures", "parser-implementations"]
+
+[dependencies]
+arrow-array.workspace = true
+arrow-csv.workspace = true
+arrow-schema.workspace = true
+parquet.workspace = true
+
+[features]
+default = ["snappy", "gzip", "lz4", "zstd", "brotli"]
+# Parquet compression codecs.
+snappy = ["parquet/snap"]
+gzip = ["parquet/flate2-zlib-rs"]
+lz4 = ["parquet/lz4"]
+zstd = ["parquet/zstd"]
+brotli = ["parquet/brotli"]
+
+[lints]
+workspace = true

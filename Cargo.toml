@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://densa.dev"
+repository = "https://github.com/densa-rs/densa-connectors"
+readme = "README.md"
+# The same minimum as densa's crates.
+rust-version = "1.90"
+
+[workspace.dependencies]
+# Arrow 60, as densa uses: batches pass between the two without conversion.
+arrow-array = "60"
+arrow-csv = "60"
+arrow-schema = "60"
+# Codecs are densa-files features.
+parquet = { version = "60", default-features = false, features = ["arrow"] }
+densa-files = { path = "crates/densa-files", version = "0.1.0" }
+# densa's crates are not on crates.io yet: the viewer takes them from the repository, at a
+# commit (move it on deliberately: densa's APIs still change).
+densa-arrow = { git = "https://github.com/densa-rs/densa", rev = "fffa7bd" }
+densa-data = { git = "https://github.com/densa-rs/densa", rev = "fffa7bd" }
+densa-ui = { git = "https://github.com/densa-rs/densa", rev = "fffa7bd" }
+densa-widgets = { git = "https://github.com/densa-rs/densa", rev = "fffa7bd" }
+densa-window = { git = "https://github.com/densa-rs/densa", rev = "fffa7bd" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1

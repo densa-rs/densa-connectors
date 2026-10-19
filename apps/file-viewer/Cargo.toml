@@ -1,0 +1,22 @@
+[package]
+name = "file-viewer"
+description = "Opens a CSV or Parquet file in densa's live grid while it loads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+arrow-array.workspace = true
+densa-arrow.workspace = true
+densa-data.workspace = true
+densa-files.workspace = true
+densa-ui.workspace = true
+densa-widgets.workspace = true
+densa-window.workspace = true
+parquet.workspace = true
+
+[lints]
+workspace = true
