@@ -49,13 +49,13 @@ partway through.
 appear as they are read, and a click on a title sorts them.
 
 ```
-cargo run --release -p file-viewer -- orders.parquet          # keyed by row number
-cargo run --release -p file-viewer -- trades.csv --key id     # keyed by a column
-cargo run --release -p file-viewer -- --sample                # a million sample orders
+cargo run --release -p file-viewer -- requests.parquet        # keyed by row number
+cargo run --release -p file-viewer -- sensors.csv --key id    # keyed by a column
+cargo run --release -p file-viewer -- --sample                # a million sample requests
 ```
 
 <p align="center">
-  <img alt="A Parquet file of a million orders in densa's grid: order id, time, symbol, side, price and quantity columns" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/file-viewer.png" width="660">
+  <img alt="A Parquet file of a million web requests in densa's grid: request, time, service, method, path, status, duration and size columns" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/file-viewer.png" width="660">
 </p>
 
 ## Next

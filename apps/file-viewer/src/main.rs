@@ -4,7 +4,7 @@
 //!
 //! `cargo run --release -p file-viewer -- PATH [--key COLUMN]`: rows are keyed by `COLUMN`
 //! (rows with the same key replace each other), or by their row number. `--sample` writes a
-//! million-row Parquet file of orders to the temporary folder and opens it; `--light` for the
+//! million-row Parquet file of web requests to the temporary folder and opens it; `--light` for the
 //! light theme, `--seconds N` to close after N seconds.
 
 use std::error::Error;
@@ -193,23 +193,32 @@ fn grouped(n: u64) -> String {
     text
 }
 
-/// Writes a million orders to a Parquet file in the temporary folder, returning its path.
+/// Writes a million web requests (a service log) to a Parquet file in the temporary folder,
+/// returning its path.
 fn write_sample() -> Result<PathBuf, Box<dyn Error>> {
     const ROWS: i64 = 1_000_000;
     const BATCH: i64 = 65_536;
-    const SYMBOLS: [&str; 8] = [
-        "ALPHA", "BRAVO", "CEDAR", "DELTA", "EMBER", "FJORD", "GAMMA", "HELIX",
+    const SERVICES: [&str; 6] = [
+        "gateway", "auth", "catalog", "checkout", "search", "storage",
     ];
-    let name = format!("densa-sample-orders-{}.parquet", std::process::id());
+    const PATHS: [&str; 6] = ["/", "/login", "/items", "/cart", "/search", "/files"];
+    const METHODS: [&str; 4] = ["GET", "GET", "POST", "PUT"];
+    let name = format!("densa-sample-requests-{}.parquet", std::process::id());
     let path = std::env::temp_dir().join(name);
     let batch = |start: i64| -> Result<RecordBatch, Box<dyn Error>> {
         let ids: Vec<i64> = (start..(start + BATCH).min(ROWS)).collect();
-        // Lossless: small indices and values.
-        let symbol = |i: i64| SYMBOLS[(i * 7 % 8) as usize];
-        let price = |i: i64| 50.0 + ((i * 7_919) % 100_000) as f64 / 100.0;
+        // Lossless: small indices.
+        let pick = |i: i64, n: i64| (i * 7_919 % n) as usize;
+        let status = |i: i64| match i % 97 {
+            0 => 500,
+            1..=3 => 404,
+            _ => 200,
+        };
+        // Whole hundredths, so values print short.
+        let millis = |i: i64| (200 + (i * 7_919) % 16_000) as f64 / 100.0;
         Ok(RecordBatch::try_from_iter([
             (
-                "order_id",
+                "request",
                 Arc::new(Int64Array::from(ids.clone())) as ArrayRef,
             ),
             (
@@ -222,31 +231,37 @@ fn write_sample() -> Result<PathBuf, Box<dyn Error>> {
                 ),
             ),
             (
-                "symbol",
+                "service",
                 Arc::new(StringArray::from_iter_values(
-                    ids.iter().map(|&i| symbol(i)),
+                    ids.iter().map(|&i| SERVICES[pick(i, 6)]),
                 )),
             ),
             (
-                "side",
-                Arc::new(StringArray::from_iter_values(ids.iter().map(|&i| {
-                    if i % 3 == 0 {
-                        "sell"
-                    } else {
-                        "buy"
-                    }
-                }))),
+                "method",
+                Arc::new(StringArray::from_iter_values(
+                    ids.iter().map(|&i| METHODS[pick(i, 4)]),
+                )),
             ),
             (
-                "price",
+                "path",
+                Arc::new(StringArray::from_iter_values(
+                    ids.iter().map(|&i| PATHS[pick(i + 3, 6)]),
+                )),
+            ),
+            (
+                "status",
+                Arc::new(Int64Array::from_iter_values(ids.iter().map(|&i| status(i)))),
+            ),
+            (
+                "ms",
                 Arc::new(Float64Array::from_iter_values(
-                    ids.iter().map(|&i| price(i)),
+                    ids.iter().map(|&i| millis(i)),
                 )),
             ),
             (
-                "quantity",
+                "bytes",
                 Arc::new(Int64Array::from_iter_values(
-                    ids.iter().map(|&i| 1 + i % 500),
+                    ids.iter().map(|&i| 200 + i * 31 % 40_000),
                 )),
             ),
         ])?)

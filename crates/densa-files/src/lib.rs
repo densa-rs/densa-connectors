@@ -16,7 +16,7 @@
 //! ```no_run
 //! use densa_files::{Loader, OpenOptions};
 //!
-//! let reader = OpenOptions::new().row_numbers("row").open("orders.parquet")?;
+//! let reader = OpenOptions::new().row_numbers("row").open("requests.parquet")?;
 //! let mut loader = Loader::spawn(reader, || { /* ask the window for a frame */ })?;
 //! // Each frame: take what is ready.
 //! while let Some(batch) = loader.try_next() {
