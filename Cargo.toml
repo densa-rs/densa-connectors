@@ -47,6 +47,16 @@ densa-ui = "0.1"
 densa-widgets = "0.1"
 densa-window = "0.1"
 
+# Until densa's next release, the apps use densa's main branch (Cargo.lock pins the commit):
+# sql-viewer's live demo needs `LiveTable::snapshot`, newer than densa 0.1.0. Only the apps
+# depend on densa, so the connectors themselves are unaffected.
+[patch.crates-io]
+densa-arrow = { git = "https://github.com/densa-rs/densa" }
+densa-data = { git = "https://github.com/densa-rs/densa" }
+densa-ui = { git = "https://github.com/densa-rs/densa" }
+densa-widgets = { git = "https://github.com/densa-rs/densa" }
+densa-window = { git = "https://github.com/densa-rs/densa" }
+
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"

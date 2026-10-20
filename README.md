@@ -9,7 +9,8 @@ Connectors live apart from densa's core crates because the formats and protocols
 bring large dependency trees of their own.
 
 > **Status: 0.x, experimental.** These crates are not on crates.io yet (take them from this
-> repository); the apps use densa's crates from [crates.io](https://crates.io/crates/densa).
+> repository). Until densa's next release, the apps use densa's main branch (pinned in
+> `Cargo.lock`); the connectors themselves do not depend on densa.
 
 ## Crates
 
@@ -156,6 +157,15 @@ Queries only read: creating tables, writing files and changing settings need
 `Query::allow_changes`. DataFusion 55 is built on Arrow 59 and densa on Arrow 60: batches
 cross between the two as Arrow IPC.
 
+A densa live table is queried through a snapshot of its live rows: register it, and again
+whenever the query should see newer rows.
+
+```rust
+let batches = table.snapshot()?; // densa_data::LiveTable: the latest row of each key
+engine.deregister("orders")?;
+engine.register_batches("orders", table.schema(), &batches)?;
+```
+
 ## Applications
 
 `file-viewer` opens a CSV or Parquet file in densa's live grid while the file loads: rows
@@ -207,6 +217,7 @@ query and press Enter to run another.
 
 ```
 cargo run --release -p sql-viewer -- --demo     # a million requests, summarized
+cargo run --release -p sql-viewer -- --live     # requests streaming into a live table, queried each second
 cargo run --release -p sql-viewer -- --table trips=trips.parquet --table zones=zones.csv \
     "SELECT zone, count(*) AS trips FROM trips JOIN zones USING (zone_id) GROUP BY zone"
 ```

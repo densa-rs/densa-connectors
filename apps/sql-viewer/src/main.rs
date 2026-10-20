@@ -6,12 +6,15 @@
 //! (`--table name=path` for each file, Parquet or CSV by its extension; `--query Q` for a
 //! query that starts with `--`), `--max-rows N` to cut results off (a million by default),
 //! `--light` for the light theme, `--seconds N` to close after N seconds. `--demo` registers
-//! a million web requests as `requests` and runs a query over them. Queries only read.
+//! a million web requests as `requests` and runs a query over them. `--live` streams requests
+//! into a live table instead (the last 200,000 kept) and runs the query again each second
+//! over a snapshot of it. Queries only read.
 
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow_array::UInt64Array;
 use arrow_schema::{DataType, Field, Schema};
 use densa_arrow::LiveModel;
 use densa_data::LiveTable;
@@ -33,6 +36,16 @@ const DEFAULT_MAX_ROWS: usize = 1_000_000;
 const DEMO_QUERY: &str = "SELECT service, status, count(*) AS requests, \
     round(avg(ms), 2) AS avg_ms, max(ms) AS max_ms \
     FROM requests GROUP BY service, status ORDER BY requests DESC";
+/// The live demo's query: the latest requests per service.
+const LIVE_QUERY: &str = "SELECT service, count(*) AS requests, \
+    round(avg(ms), 2) AS avg_ms, sum(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS errors, \
+    max(time) AS latest FROM requests GROUP BY service ORDER BY service";
+/// Requests the live demo adds each frame.
+const LIVE_PER_FRAME: i64 = 2_000;
+/// Requests the live table keeps: older ones are deleted.
+const LIVE_WINDOW: i64 = 200_000;
+/// How often the live demo's query runs again.
+const LIVE_REFRESH: Duration = Duration::from_secs(1);
 
 type Grid = DataGrid<LiveModel>;
 
@@ -51,6 +64,20 @@ struct Viewer {
     state: String,
     started: Instant,
     status_at: Instant,
+    live: Option<Live>,
+    /// The result's rows so far: a query run again updates them in place, then drops those
+    /// past its own count.
+    rows: u64,
+    /// Whether the query running is the last one run again (its rows replace the last
+    /// result's in place, so the grid keeps its scroll and selection).
+    again: bool,
+}
+
+/// The live demo's requests, and when the query last ran over them.
+struct Live {
+    table: LiveTable,
+    next: i64,
+    ran: Instant,
 }
 
 struct Ids {
@@ -68,6 +95,12 @@ impl Viewer {
         if let Some(input) = ui.widget::<TextInput>(ids.input) {
             self.query = input.text().trim().to_owned();
         }
+        self.again = false;
+        self.start();
+    }
+
+    /// Starts the query in `self.query`.
+    fn start(&mut self) {
         // Dropping the stream cancels the query running.
         self.stream = None;
         if self.query.is_empty() {
@@ -87,6 +120,50 @@ impl Viewer {
         self.stream = Some(stream);
         self.state = "running".to_owned();
         self.started = Instant::now();
+        self.rows = 0;
+    }
+
+    /// Adds the live demo's next requests, drops the oldest, and runs the query again over a
+    /// snapshot each `LIVE_REFRESH`, once the last run is done.
+    fn feed(&mut self) {
+        let Some(live) = &mut self.live else {
+            return;
+        };
+        let (from, to) = (live.next, live.next + LIVE_PER_FRAME);
+        live.next = to;
+        if let Ok(batch) = samples::requests(from, to) {
+            if let Err(error) = live.table.upsert(batch) {
+                self.state = format!("requests refused: {error}");
+            }
+        }
+        let gone = (from - LIVE_WINDOW).max(0)..(to - LIVE_WINDOW).max(0);
+        if !gone.is_empty() {
+            let _ = live
+                .table
+                .delete(&arrow_array::Int64Array::from_iter_values(gone));
+        }
+        if self.stream.is_some() || live.ran.elapsed() < LIVE_REFRESH {
+            return;
+        }
+        live.ran = Instant::now();
+        let registered = live
+            .table
+            .snapshot()
+            .map_err(|e| e.to_string())
+            .and_then(|batches| {
+                let _ = self.engine.deregister("requests");
+                let schema = Arc::clone(live.table.schema());
+                self.engine
+                    .register_batches("requests", &schema, &batches)
+                    .map_err(|e| e.to_string())
+            });
+        match registered {
+            Ok(()) => {
+                self.again = true;
+                self.start();
+            }
+            Err(error) => self.state = format!("snapshot not registered: {error}"),
+        }
     }
 
     /// Takes in what has arrived, for at most a frame's budget. Whether some is left.
@@ -102,8 +179,22 @@ impl Viewer {
             match event {
                 QueryEvent::Schema(schema) => {
                     let mut error = None;
+                    let again = self.again;
                     ui.update::<Grid, _>(ids.grid, |grid, cx| {
-                        // A new result, a new table: the rows of the last one go.
+                        // The same query again, with the same columns: its rows replace the
+                        // last ones in place. Otherwise a new table: the last rows go.
+                        let same = |table: &LiveTable| {
+                            let names = |s: &Schema| -> Vec<(String, DataType)> {
+                                let fields = s.fields().iter();
+                                fields
+                                    .map(|f| (f.name().clone(), f.data_type().clone()))
+                                    .collect()
+                            };
+                            names(table.schema()) == names(&schema)
+                        };
+                        if again && same(grid.model().table()) {
+                            return;
+                        }
                         match LiveTable::new(schema, ROW) {
                             Ok(fresh) => *grid.model_mut(cx).table_mut() = fresh,
                             Err(e) => error = Some(e.to_string()),
@@ -114,6 +205,7 @@ impl Viewer {
                     }
                 }
                 QueryEvent::Batch(batch) => {
+                    self.rows += batch.num_rows() as u64;
                     let mut refused = None;
                     let mut shown = 0;
                     ui.update::<Grid, _>(ids.grid, |grid, cx| {
@@ -132,8 +224,19 @@ impl Viewer {
                     }
                 }
                 QueryEvent::Finished => {
+                    // Rows past this result's count are the last result's.
+                    let rows = self.rows;
+                    ui.update::<Grid, _>(ids.grid, |grid, cx| {
+                        let table = grid.model_mut(cx).table_mut();
+                        let stale = rows..table.len() as u64;
+                        if !stale.is_empty() {
+                            let _ = table.delete(&UInt64Array::from_iter_values(stale));
+                        }
+                    });
                     let seconds = self.started.elapsed().as_secs_f64();
                     self.state = format!("done in {seconds:.2} s");
+                    self.stream = None;
+                    return false;
                 }
                 QueryEvent::Failed { reason } => {
                     // The rows shown were the last result's: they go, so they are not taken
@@ -145,6 +248,9 @@ impl Viewer {
                     });
                     let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
                     self.state = format!("failed: {reason}");
+                    // Done: the live demo may run it again.
+                    self.stream = None;
+                    return false;
                 }
                 _ => {}
             }
@@ -212,6 +318,7 @@ impl App for Viewer {
     }
 
     fn frame(&mut self, ui: &mut Ui, host: &mut Host<'_>) -> bool {
+        self.feed();
         let more = self.take(ui);
         if self.status_at.elapsed() >= STATUS_EVERY || !more {
             self.status_at = Instant::now();
@@ -221,8 +328,9 @@ impl App for Viewer {
             host.close();
             return false;
         }
-        // The query wakes the window as events come; events left over need another frame.
-        more || self.close_at.is_some()
+        // The query wakes the window as events come; events left over need another frame,
+        // and the live demo's requests keep coming.
+        more || self.close_at.is_some() || self.live.is_some()
     }
 }
 
@@ -246,13 +354,14 @@ struct Args {
     tables: Vec<(String, String)>,
     query: Option<String>,
     demo: bool,
+    live: bool,
     light: bool,
     seconds: Option<u64>,
     max_rows: usize,
 }
 
 const USAGE: &str = "usage: sql-viewer --table name=path... [QUERY] [--max-rows N] [--light] \
-                     [--seconds N], or --demo";
+                     [--seconds N], or --demo, or --live";
 
 /// Reads the command line. A query may start with `--` (an SQL comment): anything after
 /// `--query` is taken whole.
@@ -261,6 +370,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         tables: Vec::new(),
         query: None,
         demo: false,
+        live: false,
         light: false,
         seconds: None,
         max_rows: DEFAULT_MAX_ROWS,
@@ -295,6 +405,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--demo" => {
                 parsed.demo = true;
+                at += 1;
+            }
+            "--live" => {
+                parsed.live = true;
                 at += 1;
             }
             "--light" => {
@@ -342,7 +456,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&args) {
-        Ok(args) if args.demo || !args.tables.is_empty() => args,
+        Ok(args) if args.demo || args.live || !args.tables.is_empty() => args,
         Ok(_) => return Err(USAGE.into()),
         Err(error) => return Err(format!("{error}\n{USAGE}").into()),
     };
@@ -353,6 +467,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         register_demo(&engine)?;
         names.push("requests".to_owned());
         query.get_or_insert_with(|| DEMO_QUERY.to_owned());
+    }
+    let mut live = None;
+    if args.live {
+        let schema = samples::requests(0, 0)?.schema();
+        let table = LiveTable::new(schema, "request")?;
+        live = Some(Live {
+            table,
+            next: 0,
+            ran: Instant::now() - LIVE_REFRESH,
+        });
+        names.push("requests (live)".to_owned());
+        query.get_or_insert_with(|| LIVE_QUERY.to_owned());
     }
     for (name, path) in &args.tables {
         register(&engine, name, path)?;
@@ -373,6 +499,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         state: String::new(),
         started: Instant::now(),
         status_at: Instant::now(),
+        live,
+        rows: 0,
+        again: false,
     };
     densa_window::run(
         WindowOptions::new("densa sql viewer").with_size(1100.0, 700.0),
