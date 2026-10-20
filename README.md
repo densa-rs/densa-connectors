@@ -85,10 +85,13 @@ fn follow() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 A JSON message holds one or more objects; one that cannot be read is skipped whole and
-reported. Without columns given, `StreamOptions::json_inferred(url)` reads them from the
-first message (numbers as `Float64`, so a fraction that comes later is never cut off). Arrow IPC streams may be split across binary messages in any way. A lost
+reported. Arrow IPC streams may be split across binary messages in any way. A lost
 connection is opened again, and the subscriptions sent again, after a wait that doubles up
 to a limit.
+
+Without the columns given, `StreamOptions::json_inferred(url)` reads them from the first
+message: its fields in order, numbers as `Float64` (a fraction that comes after whole numbers
+is never cut off), text, booleans, nested objects and lists.
 
 ## A Flight SQL query in a live table
 

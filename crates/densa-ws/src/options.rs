@@ -18,14 +18,23 @@ pub enum MessageFormat {
         schema: SchemaRef,
     },
     /// Text messages of JSON objects, as [`Json`](Self::Json), read with the columns of the
-    /// first message that has any: each field of its objects is a column, in the order they
-    /// come, typed by its values there: numbers `Float64` (one message cannot tell a field
-    /// of whole numbers from one whose fractions have not come yet, and Arrow would cut
-    /// fractions off; whole numbers up to 2^53 stay exact), text, booleans, nested values as
-    /// structs and lists, and a field null in all of them text. The columns stay for the
-    /// stream's life, across reconnections: fields that appear later are ignored, numbers
-    /// and booleans in a text column are kept as text, and a message whose values do not
-    /// fit is skipped whole. Give the columns ([`Json`](Self::Json)) for other types.
+    /// first message that has any (its first thousand objects): each field of its objects
+    /// is a column, in the order they come, typed by its values there. Numbers are
+    /// `Float64`, nested ones too (one message cannot tell a field of whole numbers from one
+    /// whose fractions have not come yet, and Arrow would cut fractions off; whole numbers
+    /// up to 2^53 stay exact); text, booleans, and nested objects and arrays as structs and
+    /// lists. A field that is null in all of them is text, and so is one whose values
+    /// disagree (a number in one object, `true` in another): a first message with
+    /// `"price": null` makes `price` text for good.
+    ///
+    /// The columns stay for the stream's life, across reconnections: fields that appear
+    /// later are ignored, numbers and booleans in a text column are kept as text, and a
+    /// message whose values do not fit is skipped whole. Top-level arrays are not rows: a
+    /// message holding one is skipped. A first message whose columns cannot be read (an object
+    /// in one row and a number in another, or more than 1,024 columns, nested ones counted),
+    /// or whose own rows do not fit what was read from it (a number in one row and an array
+    /// in another), is skipped, and the next one is read for columns instead. Nested objects' fields come in alphabetical order. Give the columns
+    /// ([`Json`](Self::Json)) for other types.
     JsonInferred,
     /// Binary messages carrying an Arrow IPC stream: a schema message, then record batches,
     /// split across messages in any way. Each connection starts a new IPC stream; text

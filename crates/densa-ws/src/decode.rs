@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -7,7 +10,13 @@ use arrow_json::reader::{infer_json_schema_from_iterator, Decoder as JsonDecoder
 use arrow_json::ReaderBuilder;
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::Value;
+
+/// Objects of a stream's first message its columns are read from, at most.
+const INFER_ROWS: usize = 1_000;
+/// Columns (nested ones counted) a stream's columns may be read as, at most.
+const MAX_INFERRED_COLUMNS: usize = 1_024;
 
 use crate::{MessageFormat, StreamError};
 
@@ -160,7 +169,8 @@ impl Json {
     /// Decodes one message whole: its rows join the gathered ones only if all of it reads.
     /// Without a schema yet, the message's objects give it first.
     fn message(&mut self, bytes: &[u8], out: &mut Vec<RecordBatch>) -> Result<(), Problem> {
-        if self.scratch.is_none() {
+        let inferring = self.scratch.is_none();
+        if inferring {
             let Some(schema) = infer(bytes)? else {
                 // Nothing to read the columns from: the next message may have them.
                 return Ok(());
@@ -182,7 +192,13 @@ impl Json {
             // Whole rows only: the one being read when it failed was never a row.
             let buffered = scratch.len() - usize::from(scratch.has_partial_record());
             let rows_lost = decoded.iter().map(RecordBatch::num_rows).sum::<usize>() + buffered;
-            self.scratch_fresh();
+            if inferring {
+                // Columns that do not fit the message they came from: read the next one's.
+                self.schema = None;
+                self.scratch = None;
+            } else {
+                self.scratch_fresh();
+            }
             return Err(Problem::Skipped {
                 reason: error.to_string(),
                 rows_lost,
@@ -307,30 +323,108 @@ fn json_decoder(
         .map_err(|error| StreamError::Schema(error.to_string()))
 }
 
-/// The columns of the JSON objects in `bytes`, typed by their values there, with numbers as
-/// `Float64` and a field that is null in all of them as text; `None` if the message has no
-/// fields to read.
+/// The columns of the JSON objects in `bytes` (its first [`INFER_ROWS`]), in the order
+/// their fields come, typed by their values there, with numbers as `Float64` and fields
+/// that are null in all of them as text; `None` if the message has no fields to read.
 fn infer(bytes: &[u8]) -> Result<Option<SchemaRef>, Problem> {
+    let read = Cell::new(0);
     let values = serde_json::Deserializer::from_slice(bytes)
         .into_iter::<Value>()
+        .take(INFER_ROWS)
+        .inspect(|value| read.set(read.get() + usize::from(value.is_ok())))
         .map(|value| value.map_err(|error| ArrowError::JsonError(error.to_string())));
-    let schema = infer_json_schema_from_iterator(values).map_err(|error| Problem::Skipped {
-        reason: format!("no columns could be read from it: {error}"),
-        rows_lost: 0,
-    })?;
+    let skipped = |reason: String| Problem::Skipped {
+        reason: format!("no columns could be read from it: {reason}"),
+        rows_lost: read.get(),
+    };
+    let schema = infer_json_schema_from_iterator(values).map_err(|e| skipped(e.to_string()))?;
     if schema.fields().is_empty() {
         return Ok(None);
     }
-    let fields: Vec<Field> = schema
+    let columns: usize = schema
         .fields()
         .iter()
-        .map(|field| match field.data_type() {
-            DataType::Null => Field::new(field.name(), DataType::Utf8, true),
-            DataType::Int64 => Field::new(field.name(), DataType::Float64, true),
-            _ => field.as_ref().clone(),
-        })
-        .collect();
+        .map(|f| columns_in(f.data_type()))
+        .sum();
+    if columns > MAX_INFERRED_COLUMNS {
+        return Err(skipped(format!(
+            "{columns} columns, over the {MAX_INFERRED_COLUMNS} allowed"
+        )));
+    }
+    let order = field_order(bytes);
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| widened(f)).collect();
+    fields.sort_by_key(|field| order.iter().position(|name| name == field.name()));
     Ok(Some(Arc::new(Schema::new(fields))))
+}
+
+/// How many columns a value of `data_type` takes, nested ones counted.
+fn columns_in(data_type: &DataType) -> usize {
+    match data_type {
+        DataType::Struct(fields) => {
+            1 + fields
+                .iter()
+                .map(|f| columns_in(f.data_type()))
+                .sum::<usize>()
+        }
+        DataType::List(item) | DataType::LargeList(item) => 1 + columns_in(item.data_type()),
+        _ => 1,
+    }
+}
+
+/// `field` with whole numbers read as `Float64` and always-null values as text, nested
+/// fields too.
+fn widened(field: &Field) -> Field {
+    let data_type = match field.data_type() {
+        DataType::Int64 => DataType::Float64,
+        DataType::Null => DataType::Utf8,
+        DataType::Struct(fields) => DataType::Struct(fields.iter().map(|f| widened(f)).collect()),
+        DataType::List(item) => DataType::List(Arc::new(widened(item))),
+        DataType::LargeList(item) => DataType::LargeList(Arc::new(widened(item))),
+        other => other.clone(),
+    };
+    Field::new(field.name(), data_type, true)
+}
+
+/// The top-level fields of the objects in `bytes` (its first [`INFER_ROWS`]), in the order
+/// they first come. (serde_json's own maps sort their keys.)
+fn field_order(bytes: &[u8]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    let objects = serde_json::Deserializer::from_slice(bytes).into_iter::<Keys>();
+    for Keys(keys) in objects.take(INFER_ROWS).map_while(Result::ok) {
+        for key in keys {
+            if seen.insert(key.clone()) {
+                order.push(key);
+            }
+        }
+    }
+    order
+}
+
+/// An object's keys in the order they come, its values skipped.
+struct Keys(Vec<String>);
+
+impl<'de> Deserialize<'de> for Keys {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeysOf;
+        impl<'de> Visitor<'de> for KeysOf {
+            type Value = Keys;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    map.next_value::<IgnoredAny>()?;
+                    keys.push(key);
+                }
+                Ok(Keys(keys))
+            }
+        }
+        deserializer.deserialize_map(KeysOf)
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +575,119 @@ mod tests {
             batch.column(0).as_primitive::<Float64Type>().values(),
             &[1.0, 3.0]
         );
+    }
+
+    /// The rows lost with the first message `read` skipped.
+    fn lost(decoder: &mut Decoder, message: &str) -> usize {
+        match decoder.text(message.as_bytes(), &mut Vec::new()) {
+            Err(Problem::Skipped { rows_lost, .. }) => rows_lost,
+            _ => panic!("{message} was not skipped"),
+        }
+    }
+
+    #[test]
+    fn nested_numbers_are_floats_and_nested_nulls_text() {
+        let mut decoder = inferring();
+        let results = read(
+            &mut decoder,
+            &[
+                r#"{"p":{"x":1,"n":null},"l":[1],"e":[]}"#,
+                r#"{"p":{"x":1.5,"n":"t"},"l":[2.5],"e":["a"]}"#,
+            ],
+        );
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let batch = gathered(&mut decoder);
+        let point = batch.column(0).as_struct();
+        let x = point
+            .column_by_name("x")
+            .unwrap()
+            .as_primitive::<Float64Type>();
+        assert_eq!(
+            x.values(),
+            &[1.0, 1.5],
+            "a fraction in a nested field is kept"
+        );
+        let n = point.column_by_name("n").unwrap().as_string::<i32>();
+        assert_eq!(n.value(1), "t");
+        let list = batch.column(1).as_list::<i32>();
+        let items = list.values().as_primitive::<Float64Type>();
+        assert_eq!(items.values(), &[1.0, 2.5]);
+        let empty = batch.column(2).as_list::<i32>();
+        assert_eq!(empty.values().as_string::<i32>().value(0), "a");
+    }
+
+    #[test]
+    fn too_many_columns_are_refused_and_the_next_message_is_read_for_them() {
+        let wide = |count: usize| {
+            let fields: Vec<String> = (0..count).map(|i| format!(r#""c{i}":1"#)).collect();
+            format!("{{{}}}", fields.join(","))
+        };
+        let mut decoder = inferring();
+        let results = read(&mut decoder, &[&wide(MAX_INFERRED_COLUMNS + 1)]);
+        assert!(results[0]
+            .as_ref()
+            .unwrap_err()
+            .contains("over the 1024 allowed"));
+        let nested = format!(r#"{{"a":{}}}"#, wide(MAX_INFERRED_COLUMNS));
+        assert!(
+            read(&mut decoder, &[&nested])[0].is_err(),
+            "nested columns count"
+        );
+        assert!(read(&mut decoder, &[&wide(MAX_INFERRED_COLUMNS)])[0].is_ok());
+        assert_eq!(gathered(&mut decoder).num_columns(), MAX_INFERRED_COLUMNS);
+    }
+
+    #[test]
+    fn a_first_message_that_cannot_be_read_counts_its_rows_lost() {
+        let mut decoder = inferring();
+        assert_eq!(
+            lost(&mut decoder, r#"{"a":{}} {"a":1}"#),
+            2,
+            "an object, then a number"
+        );
+        assert_eq!(
+            lost(&mut decoder, r#"{"a":1} {"a":"#),
+            1,
+            "a row, then a cut-off one"
+        );
+        assert_eq!(
+            lost(&mut decoder, r#"[{"a":1},{"a":2}]"#),
+            1,
+            "a top-level array"
+        );
+        assert!(read(&mut decoder, &[r#"{"b":1}"#])[0].is_ok());
+        let columns = columns(&gathered(&mut decoder));
+        assert_eq!(columns, [("b".to_owned(), DataType::Float64)]);
+    }
+
+    #[test]
+    fn columns_that_do_not_fit_their_own_message_are_read_again() {
+        let mut decoder = inferring();
+        // A number in one object and an array in another reads as a list, which the number
+        // does not fit.
+        assert_eq!(lost(&mut decoder, r#"{"a":[1]} {"a":2}"#), 2);
+        assert!(read(&mut decoder, &[r#"{"a":"x"}"#])[0].is_ok());
+        let columns = columns(&gathered(&mut decoder));
+        assert_eq!(columns, [("a".to_owned(), DataType::Utf8)]);
+    }
+
+    #[test]
+    fn values_that_disagree_in_the_first_message_make_text() {
+        let mut decoder = inferring();
+        assert!(read(&mut decoder, &[r#"{"a":1} {"a":true}"#])[0].is_ok());
+        let batch = gathered(&mut decoder);
+        let values = batch.column(0).as_string::<i32>();
+        assert_eq!((values.value(0), values.value(1)), ("1", "true"));
+    }
+
+    #[test]
+    fn only_the_first_objects_are_read_for_columns() {
+        let mut first: Vec<String> = (0..INFER_ROWS).map(|_| r#"{"a":1}"#.to_owned()).collect();
+        first.push(r#"{"a":2,"late":"x"}"#.to_owned());
+        let mut decoder = inferring();
+        assert!(read(&mut decoder, &[&first.join("\n")])[0].is_ok());
+        let columns = columns(&gathered(&mut decoder));
+        assert_eq!(columns, [("a".to_owned(), DataType::Float64)]);
     }
 
     #[test]
