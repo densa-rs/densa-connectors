@@ -633,6 +633,11 @@ mod tests {
             read(&mut decoder, &[&nested])[0].is_err(),
             "nested columns count"
         );
+        let listed = format!(r#"{{"a":[{}]}}"#, wide(MAX_INFERRED_COLUMNS - 1));
+        assert!(
+            read(&mut decoder, &[&listed])[0].is_err(),
+            "a list and its items count"
+        );
         assert!(read(&mut decoder, &[&wide(MAX_INFERRED_COLUMNS)])[0].is_ok());
         assert_eq!(gathered(&mut decoder).num_columns(), MAX_INFERRED_COLUMNS);
     }
