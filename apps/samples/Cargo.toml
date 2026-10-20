@@ -1,6 +1,6 @@
 [package]
 name = "samples"
-description = "Sample data the connector apps show: a service's web requests"
+description = "Sample data the connector apps show: a service's web requests, a stream of sensor readings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+tungstenite.workspace = true
 
 [lints]
 workspace = true

@@ -21,6 +21,9 @@ arrow-ipc = "60"
 arrow-json = "60"
 arrow-schema = "60"
 arrow-select = "60"
+# JSON values, to read a stream's columns from its first message (arrow-json uses it too);
+# objects keep their fields in order, so the columns come in the order the stream sends them.
+serde_json = { version = "1", features = ["preserve_order"] }
 # WebSocket without an async runtime; TLS through rustls on the ring backend (no C toolchain
 # beyond what ring needs, no OpenSSL).
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

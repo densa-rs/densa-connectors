@@ -1,5 +1,9 @@
 //! Sample data the connector apps show: a service's web requests, the same rows whichever
-//! app makes them, so the demos agree.
+//! app makes them, so the demos agree, and a local stream of sensor readings.
+
+mod readings;
+
+pub use readings::{readings_server, SENSORS};
 
 use std::sync::Arc;
 

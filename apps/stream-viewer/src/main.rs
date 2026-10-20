@@ -9,10 +9,8 @@
 //! theme, `--seconds N` to close after N seconds.
 
 use std::error::Error;
-use std::net::TcpListener;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use densa_arrow::LiveModel;
@@ -203,58 +201,6 @@ fn columns(spec: &str) -> Result<SchemaRef, String> {
     Ok(Arc::new(Schema::new(fields)))
 }
 
-/// Starts a local server sending readings of 500 sensors, a hundred every 20 ms, and
-/// returns its URL.
-fn demo_server() -> Result<String, Box<dyn Error>> {
-    const SENSORS: u64 = 500;
-    const SITES: [&str; 6] = ["north", "south", "east", "west", "harbor", "airfield"];
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let url = format!("ws://{}/readings", listener.local_addr()?);
-    thread::spawn(move || {
-        for connection in listener.incoming().flatten() {
-            thread::spawn(move || {
-                let Ok(mut socket) = tungstenite::accept(connection) else {
-                    return;
-                };
-                let mut seed = 0x5EED_u64;
-                let mut next = || {
-                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                    // Lossless: the high bits of a 64-bit state.
-                    (seed >> 11) as f64 / (1_u64 << 53) as f64
-                };
-                loop {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_or(0, |d| d.as_millis());
-                    let rows: Vec<String> = (0..100)
-                        .map(|_| {
-                            // Lossless: an index below 500.
-                            let sensor = (next() * SENSORS as f64) as u64;
-                            // Lossless: an index below 6.
-                            let site = SITES[(sensor % 6) as usize];
-                            let base = 15.0 + (sensor % 17) as f64;
-                            let celsius = base + (next() - 0.5) * 4.0;
-                            let humidity = 30.0 + next() * 50.0;
-                            format!(
-                                r#"{{"sensor":"s-{sensor:04}","site":"{site}","celsius":{celsius:.2},"humidity":{humidity:.1},"ok":{},"time":{now}}}"#,
-                                celsius < base + 1.8
-                            )
-                        })
-                        .collect();
-                    if socket
-                        .send(tungstenite::Message::text(rows.join("\n")))
-                        .is_err()
-                    {
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(20));
-                }
-            });
-        }
-    });
-    Ok(url)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let value = |flag: &str| -> Result<Option<String>, String> {
@@ -268,7 +214,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let (url, schema, key) = if args.iter().any(|a| a == "--demo") {
         let spec = "sensor:string,site:string,celsius:float,humidity:float,ok:bool,time:time";
-        (demo_server()?, columns(spec)?, "sensor".to_owned())
+        (
+            samples::readings_server()?,
+            columns(spec)?,
+            "sensor".to_owned(),
+        )
     } else {
         let Some(url) = args
             .iter()

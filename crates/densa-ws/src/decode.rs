@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use arrow_array::RecordBatch;
 use arrow_buffer::Buffer;
 use arrow_ipc::reader::StreamDecoder;
-use arrow_json::reader::Decoder as JsonDecoder;
+use arrow_json::reader::{infer_json_schema_from_iterator, Decoder as JsonDecoder};
 use arrow_json::ReaderBuilder;
-use arrow_schema::{ArrowError, SchemaRef};
+use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
+use serde_json::Value;
 
 use crate::{MessageFormat, StreamError};
 
@@ -17,10 +20,15 @@ pub(crate) enum Decoder {
 /// JSON rows: each message decoded on its own (so a bad one loses only itself), its rows
 /// gathered with the earlier messages' into batches of `rows`.
 pub(crate) struct Json {
-    schema: SchemaRef,
+    /// `None` until the first message with objects gives it, for a stream whose columns
+    /// are inferred.
+    schema: Option<SchemaRef>,
+    /// Whether the columns were inferred: numbers and booleans are then taken as text in a
+    /// text column.
+    inferred: bool,
     rows: usize,
-    /// Empty between messages.
-    scratch: JsonDecoder,
+    /// Empty between messages; `None` while there is no schema.
+    scratch: Option<JsonDecoder>,
     /// Complete rows of earlier messages, not yet handed over.
     gathered: Vec<RecordBatch>,
     gathered_rows: usize,
@@ -53,9 +61,18 @@ impl Decoder {
     ) -> Result<Self, StreamError> {
         Ok(match format {
             MessageFormat::Json { schema } => Self::Json(Box::new(Json {
-                schema: schema.clone(),
+                schema: Some(schema.clone()),
+                inferred: false,
                 rows,
-                scratch: json_decoder(schema, rows)?,
+                scratch: Some(json_decoder(schema, rows, false)?),
+                gathered: Vec::new(),
+                gathered_rows: 0,
+            })),
+            MessageFormat::JsonInferred => Self::Json(Box::new(Json {
+                schema: None,
+                inferred: true,
+                rows,
+                scratch: None,
                 gathered: Vec::new(),
                 gathered_rows: 0,
             })),
@@ -130,19 +147,40 @@ impl Decoder {
 
 impl Json {
     fn scratch_fresh(&mut self) {
-        // The schema was accepted when the stream started.
-        if let Ok(fresh) = json_decoder(&self.schema, self.rows) {
-            self.scratch = fresh;
+        // The schema was accepted when the stream started, or when it was inferred.
+        let fresh = self
+            .schema
+            .as_ref()
+            .map(|schema| json_decoder(schema, self.rows, self.inferred));
+        if let Some(Ok(fresh)) = fresh {
+            self.scratch = Some(fresh);
         }
     }
 
     /// Decodes one message whole: its rows join the gathered ones only if all of it reads.
+    /// Without a schema yet, the message's objects give it first.
     fn message(&mut self, bytes: &[u8], out: &mut Vec<RecordBatch>) -> Result<(), Problem> {
+        if self.scratch.is_none() {
+            let Some(schema) = infer(bytes)? else {
+                // Nothing to read the columns from: the next message may have them.
+                return Ok(());
+            };
+            let decoder =
+                json_decoder(&schema, self.rows, true).map_err(|error| Problem::Skipped {
+                    reason: error.to_string(),
+                    rows_lost: 0,
+                })?;
+            self.schema = Some(schema);
+            self.scratch = Some(decoder);
+        }
+        let Some(scratch) = self.scratch.as_mut() else {
+            return Ok(());
+        };
         let mut decoded = Vec::new();
-        let result = decode_all(&mut self.scratch, bytes, self.rows, &mut decoded);
+        let result = decode_all(scratch, bytes, self.rows, &mut decoded);
         if let Err(error) = result {
             // Whole rows only: the one being read when it failed was never a row.
-            let buffered = self.scratch.len() - usize::from(self.scratch.has_partial_record());
+            let buffered = scratch.len() - usize::from(scratch.has_partial_record());
             let rows_lost = decoded.iter().map(RecordBatch::num_rows).sum::<usize>() + buffered;
             self.scratch_fresh();
             return Err(Problem::Skipped {
@@ -189,7 +227,7 @@ impl Json {
         if batches.len() == 1 {
             return Ok(batches.into_iter().next());
         }
-        concat_batches(&self.schema, &batches)
+        concat_batches(&batches[0].schema(), &batches)
             .map(Some)
             .map_err(|error| Problem::Skipped {
                 reason: error.to_string(),
@@ -257,9 +295,203 @@ impl Ipc {
     }
 }
 
-fn json_decoder(schema: &SchemaRef, rows: usize) -> Result<JsonDecoder, StreamError> {
+fn json_decoder(
+    schema: &SchemaRef,
+    rows: usize,
+    text_takes_primitives: bool,
+) -> Result<JsonDecoder, StreamError> {
     ReaderBuilder::new(schema.clone())
         .with_batch_size(rows)
+        .with_coerce_primitive(text_takes_primitives)
         .build_decoder()
         .map_err(|error| StreamError::Schema(error.to_string()))
+}
+
+/// The columns of the JSON objects in `bytes`, typed by their values there, with numbers as
+/// `Float64` and a field that is null in all of them as text; `None` if the message has no
+/// fields to read.
+fn infer(bytes: &[u8]) -> Result<Option<SchemaRef>, Problem> {
+    let values = serde_json::Deserializer::from_slice(bytes)
+        .into_iter::<Value>()
+        .map(|value| value.map_err(|error| ArrowError::JsonError(error.to_string())));
+    let schema = infer_json_schema_from_iterator(values).map_err(|error| Problem::Skipped {
+        reason: format!("no columns could be read from it: {error}"),
+        rows_lost: 0,
+    })?;
+    if schema.fields().is_empty() {
+        return Ok(None);
+    }
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|field| match field.data_type() {
+            DataType::Null => Field::new(field.name(), DataType::Utf8, true),
+            DataType::Int64 => Field::new(field.name(), DataType::Float64, true),
+            _ => field.as_ref().clone(),
+        })
+        .collect();
+    Ok(Some(Arc::new(Schema::new(fields))))
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::Float64Type;
+    use arrow_array::Array;
+
+    use super::*;
+
+    fn inferring() -> Decoder {
+        Decoder::new(&MessageFormat::JsonInferred, 100, 1 << 20).unwrap()
+    }
+
+    /// Reads `messages` as text, then everything gathered, as one batch.
+    fn read(decoder: &mut Decoder, messages: &[&str]) -> Vec<Result<(), String>> {
+        let mut out = Vec::new();
+        messages
+            .iter()
+            .map(|message| {
+                decoder
+                    .text(message.as_bytes(), &mut out)
+                    .map_err(|problem| match problem {
+                        Problem::Skipped { reason, .. } | Problem::Broken(reason) => reason,
+                    })
+            })
+            .collect()
+    }
+
+    fn gathered(decoder: &mut Decoder) -> RecordBatch {
+        decoder.flush().ok().flatten().expect("rows gathered")
+    }
+
+    fn columns(batch: &RecordBatch) -> Vec<(String, DataType)> {
+        let schema = batch.schema();
+        let fields = schema.fields().iter();
+        fields
+            .map(|f| (f.name().clone(), f.data_type().clone()))
+            .collect()
+    }
+
+    #[test]
+    fn the_first_message_gives_the_columns_in_the_order_they_come() {
+        let mut decoder = inferring();
+        let first =
+            r#"{"sensor":"a","celsius":21,"ok":true} {"sensor":"b","celsius":21.5,"note":null}"#;
+        assert!(read(&mut decoder, &[first]).iter().all(Result::is_ok));
+        let batch = gathered(&mut decoder);
+        assert_eq!(
+            columns(&batch),
+            [
+                ("sensor".to_owned(), DataType::Utf8),
+                ("celsius".to_owned(), DataType::Float64),
+                ("ok".to_owned(), DataType::Boolean),
+                ("note".to_owned(), DataType::Utf8),
+            ],
+            "numbers are floats; a field always null is text"
+        );
+        assert_eq!(batch.num_rows(), 2);
+        let celsius = batch.column(1).as_primitive::<Float64Type>();
+        assert_eq!(celsius.values(), &[21.0, 21.5]);
+    }
+
+    #[test]
+    fn later_messages_keep_the_columns() {
+        let mut decoder = inferring();
+        let results = read(
+            &mut decoder,
+            &[
+                r#"{"id":1,"name":"a","note":null}"#,
+                r#"{"id":2,"name":7,"note":true,"extra":"ignored"}"#,
+                r#"{"id":2.5,"name":"c"}"#,
+            ],
+        );
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let batch = gathered(&mut decoder);
+        assert_eq!(
+            batch.num_columns(),
+            3,
+            "a field that comes later is not a column"
+        );
+        assert_eq!(
+            batch.column(0).as_primitive::<Float64Type>().values(),
+            &[1.0, 2.0, 2.5],
+            "fractions after whole numbers are kept"
+        );
+        let names = batch.column(1).as_string::<i32>();
+        assert_eq!(
+            names.value(1),
+            "7",
+            "a number in a text column is kept as text"
+        );
+        let notes = batch.column(2).as_string::<i32>();
+        assert!(notes.is_null(0));
+        assert_eq!(notes.value(1), "true");
+    }
+
+    #[test]
+    fn messages_without_fields_wait_for_one_with_them() {
+        let mut decoder = inferring();
+        let results = read(&mut decoder, &["", "  \n", "{}", r#"{"x":1}"#]);
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(
+            columns(&gathered(&mut decoder)),
+            [("x".to_owned(), DataType::Float64)]
+        );
+    }
+
+    #[test]
+    fn a_message_that_is_not_objects_is_skipped_and_the_next_one_still_counts() {
+        let mut decoder = inferring();
+        let results = read(&mut decoder, &["[1, 2]", "not json", r#"{"x":"y"}"#]);
+        assert!(results[0].is_err() && results[1].is_err(), "{results:?}");
+        assert!(results[0]
+            .as_ref()
+            .unwrap_err()
+            .contains("no columns could be read"));
+        assert!(results[2].is_ok());
+        assert_eq!(
+            columns(&gathered(&mut decoder)),
+            [("x".to_owned(), DataType::Utf8)]
+        );
+    }
+
+    #[test]
+    fn the_columns_outlive_a_new_connection() {
+        let mut decoder = inferring();
+        read(&mut decoder, &[r#"{"x":1}"#]);
+        decoder.reset();
+        let results = read(&mut decoder, &[r#"{"x":2,"y":"new"}"#]);
+        assert!(results[0].is_ok());
+        assert_eq!(
+            columns(&gathered(&mut decoder)),
+            [("x".to_owned(), DataType::Float64)]
+        );
+    }
+
+    #[test]
+    fn values_that_do_not_fit_skip_their_message() {
+        let mut decoder = inferring();
+        let results = read(
+            &mut decoder,
+            &[r#"{"x":1}"#, r#"{"x":"text"}"#, r#"{"x":3}"#],
+        );
+        assert!(results[1].is_err(), "text in a number column: {results:?}");
+        let batch = gathered(&mut decoder);
+        assert_eq!(
+            batch.column(0).as_primitive::<Float64Type>().values(),
+            &[1.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn a_given_schema_does_not_take_numbers_as_text() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
+        let format = MessageFormat::Json { schema };
+        let mut decoder = Decoder::new(&format, 100, 1 << 20).unwrap();
+        let results = read(&mut decoder, &[r#"{"name":7}"#]);
+        assert!(
+            results[0].is_err(),
+            "as before: a given schema is read strictly"
+        );
+    }
 }

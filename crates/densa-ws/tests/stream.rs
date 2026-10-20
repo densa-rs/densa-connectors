@@ -846,3 +846,36 @@ fn header_values_are_not_printed() {
         "{printed}"
     );
 }
+
+#[test]
+fn a_stream_without_columns_given_reads_them_from_its_first_message() {
+    let url = server(|listener| {
+        let mut socket = accept(&listener);
+        socket.send(Message::text("")).unwrap();
+        socket
+            .send(Message::text(
+                r#"{"sensor":"a","celsius":21} {"sensor":"b","celsius":22.5}"#,
+            ))
+            .unwrap();
+        hold(socket);
+    });
+    let mut stream = StreamOptions::json_inferred(url)
+        .max_delay(Duration::from_millis(5))
+        .connect(|| {})
+        .unwrap();
+    let batch = next_batch(&mut stream);
+    let fields: Vec<(String, DataType)> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| (f.name().clone(), f.data_type().clone()))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("sensor".to_owned(), DataType::Utf8),
+            ("celsius".to_owned(), DataType::Float64)
+        ]
+    );
+    assert_eq!(celsius(&batch), [21.0, 22.5]);
+}

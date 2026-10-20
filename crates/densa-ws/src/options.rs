@@ -17,6 +17,16 @@ pub enum MessageFormat {
         /// The rows' columns.
         schema: SchemaRef,
     },
+    /// Text messages of JSON objects, as [`Json`](Self::Json), read with the columns of the
+    /// first message that has any: each field of its objects is a column, in the order they
+    /// come, typed by its values there: numbers `Float64` (one message cannot tell a field
+    /// of whole numbers from one whose fractions have not come yet, and Arrow would cut
+    /// fractions off; whole numbers up to 2^53 stay exact), text, booleans, nested values as
+    /// structs and lists, and a field null in all of them text. The columns stay for the
+    /// stream's life, across reconnections: fields that appear later are ignored, numbers
+    /// and booleans in a text column are kept as text, and a message whose values do not
+    /// fit is skipped whole. Give the columns ([`Json`](Self::Json)) for other types.
+    JsonInferred,
     /// Binary messages carrying an Arrow IPC stream: a schema message, then record batches,
     /// split across messages in any way. Each connection starts a new IPC stream; text
     /// messages between them are skipped.
@@ -46,6 +56,12 @@ impl StreamOptions {
     /// A stream of JSON rows of `schema` from `url` (`ws://` or `wss://`).
     pub fn json(url: impl Into<String>, schema: SchemaRef) -> Self {
         Self::new(url, MessageFormat::Json { schema })
+    }
+
+    /// A stream of JSON rows from `url` (`ws://` or `wss://`) whose columns are read from
+    /// its first message: see [`MessageFormat::JsonInferred`].
+    pub fn json_inferred(url: impl Into<String>) -> Self {
+        Self::new(url, MessageFormat::JsonInferred)
     }
 
     /// A stream of Arrow IPC from `url` (`ws://` or `wss://`).

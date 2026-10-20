@@ -16,7 +16,7 @@ densa-ui.workspace = true
 densa-widgets.workspace = true
 densa-window.workspace = true
 densa-ws.workspace = true
-tungstenite.workspace = true
+samples = { path = "../samples" }
 
 [lints]
 workspace = true

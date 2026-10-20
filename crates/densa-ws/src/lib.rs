@@ -1,7 +1,7 @@
 //! WebSocket streams as Apache Arrow record batches, for densa and any other Arrow consumer.
 //!
 //! [`StreamOptions`] names a `ws://` or `wss://` URL and what its messages hold: JSON rows
-//! of a schema you give, or an Arrow IPC stream. [`StreamOptions::connect`] reads it on a
+//! of a schema you give or read from the first message, or an Arrow IPC stream. [`StreamOptions::connect`] reads it on a
 //! thread of its own, gathering JSON rows into batches (handing a partial one over after a
 //! short delay, so a slow stream still shows promptly), reconnecting with growing waits when
 //! the connection drops, and waking the interface after each [`StreamEvent`].
