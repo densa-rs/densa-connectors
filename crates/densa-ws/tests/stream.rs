@@ -326,6 +326,11 @@ fn dropping_the_stream_closes_the_connection() {
         stream.wait_next(WAIT),
         Some(StreamEvent::Connected)
     ));
+    // The wake follows the event it announces, so it may still be on its way.
+    let deadline = Instant::now() + WAIT;
+    while wakes.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
     assert!(
         wakes.load(Ordering::Relaxed) >= 1,
         "woken for the connection"
