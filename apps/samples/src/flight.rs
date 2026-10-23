@@ -1,5 +1,5 @@
-//! A local Flight service for `--demo`: any query's answer is a million web requests (a
-//! service log) in four endpoints, made as they are sent.
+//! A local Arrow Flight service for the apps' demos and tests: any request's answer is the
+//! million web requests (a service log) in four endpoints, made as they are sent.
 
 use std::error::Error;
 use std::net::TcpListener;
@@ -16,12 +16,18 @@ use futures::{StreamExt, TryStreamExt};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-const ROWS: i64 = samples::REQUESTS;
+const ROWS: i64 = crate::REQUESTS;
 const ENDPOINTS: i64 = 4;
 const BATCH: i64 = 16_384;
 
-/// Starts the service on a free local port, on a thread of its own; its URL.
-pub fn serve() -> Result<String, Box<dyn Error>> {
+/// Starts a Flight service on a free local port, on a thread of its own, and returns its URL
+/// (`grpc://127.0.0.1:PORT`). Whatever is asked (a path, a command, a Flight SQL query), it
+/// answers with the [`REQUESTS`](crate::REQUESTS) web requests, a quarter per endpoint (the
+/// ticket is the quarter's index, `0` to `3`). It runs until the process ends.
+///
+/// # Errors
+/// If no local port can be had or the runtime cannot start.
+pub fn flight_server() -> Result<String, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -83,10 +89,8 @@ impl FlightService for Requests {
             .filter(|part| (0..ENDPOINTS).contains(part))
             .ok_or_else(|| Status::not_found("no such part"))?;
         let (start, end) = (part * ROWS / ENDPOINTS, (part + 1) * ROWS / ENDPOINTS);
-        let batches =
-            futures::stream::iter((start..end).step_by(BATCH as usize)).map(move |first| {
-                samples::requests(first, (first + BATCH).min(end)).map_err(Into::into)
-            });
+        let batches = futures::stream::iter((start..end).step_by(BATCH as usize))
+            .map(move |first| crate::requests(first, (first + BATCH).min(end)).map_err(Into::into));
         let data = FlightDataEncoderBuilder::new()
             .build(batches)
             .map_err(Status::from)

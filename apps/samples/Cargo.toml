@@ -12,6 +12,15 @@ publish = false
 arrow-array.workspace = true
 arrow-schema.workspace = true
 tungstenite.workspace = true
+# The Flight service (feature `flight`).
+arrow-flight = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["net", "rt-multi-thread"], optional = true }
+tokio-stream = { version = "0.1", default-features = false, features = ["net"], optional = true }
+tonic = { workspace = true, optional = true }
+
+[features]
+flight = ["dep:arrow-flight", "dep:futures", "dep:tokio", "dep:tokio-stream", "dep:tonic"]
 
 [lints]
 workspace = true

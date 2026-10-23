@@ -1,8 +1,13 @@
 //! Sample data the connector apps show: a service's web requests, the same rows whichever
-//! app makes them, so the demos agree, and a local stream of sensor readings.
+//! app makes them, so the demos agree, a local stream of sensor readings, and (feature
+//! `flight`) a local Arrow Flight service of the requests.
 
+#[cfg(feature = "flight")]
+mod flight;
 mod readings;
 
+#[cfg(feature = "flight")]
+pub use flight::flight_server;
 pub use readings::{readings_server, SENSORS};
 
 use std::sync::Arc;

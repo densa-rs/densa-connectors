@@ -2478,7 +2478,6 @@ dependencies = [
 name = "flight-viewer"
 version = "0.1.0"
 dependencies = [
- "arrow-flight",
  "arrow-schema 60.0.0",
  "densa-arrow",
  "densa-data",
@@ -2486,11 +2485,7 @@ dependencies = [
  "densa-ui",
  "densa-widgets",
  "densa-window",
- "futures",
  "samples",
- "tokio",
- "tokio-stream",
- "tonic",
 ]
 
 [[package]]
@@ -4691,7 +4686,12 @@ name = "samples"
 version = "0.1.0"
 dependencies = [
  "arrow-array 60.0.0",
+ "arrow-flight",
  "arrow-schema 60.0.0",
+ "futures",
+ "tokio",
+ "tokio-stream",
+ "tonic",
  "tungstenite",
 ]
 

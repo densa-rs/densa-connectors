@@ -9,8 +9,6 @@
 //! `--demo` starts a local Flight service whose answer to any query is a million web
 //! requests, in four endpoints.
 
-mod demo;
-
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -253,7 +251,7 @@ fn header_value(given: &str) -> Result<String, String> {
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (options, title) = if args.iter().any(|a| a == "--demo") {
-        let url = demo::serve()?;
+        let url = samples::flight_server()?;
         let query = "SELECT * FROM requests";
         (FlightOptions::sql(url, query), query.to_owned())
     } else {
