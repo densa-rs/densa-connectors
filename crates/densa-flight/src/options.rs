@@ -17,6 +17,10 @@ pub(crate) enum FlightRequest {
     /// each endpoint.
     #[cfg(feature = "sql")]
     Sql(String),
+    /// The tables a Flight SQL service has: `GetFlightInfo` of a `CommandGetTables`, then
+    /// `DoGet` of each endpoint.
+    #[cfg(feature = "sql")]
+    Tables,
 }
 
 /// How to read a Flight service's data: [`FlightOptions::ticket`], [`path`](Self::path),
@@ -61,6 +65,14 @@ impl FlightOptions {
     #[cfg(feature = "sql")]
     pub fn sql(url: impl Into<String>, query: impl Into<String>) -> Self {
         Self::new(url, FlightRequest::Sql(query.into()))
+    }
+
+    /// The tables of the Flight SQL service at `url`, a row each, in the columns Flight SQL
+    /// gives them: `catalog_name`, `db_schema_name` (both may be null), `table_name` and
+    /// `table_type`.
+    #[cfg(feature = "sql")]
+    pub fn sql_tables(url: impl Into<String>) -> Self {
+        Self::new(url, FlightRequest::Tables)
     }
 
     fn new(url: impl Into<String>, request: FlightRequest) -> Self {

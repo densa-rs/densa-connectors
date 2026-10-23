@@ -2,8 +2,8 @@
 //! other Arrow consumer.
 //!
 //! [`FlightOptions`] names a Flight service (`grpc://`, `grpc+tls://`) and what to ask it
-//! for: a ticket, a dataset path, a command, or a Flight SQL query (the `sql` feature, on
-//! by default). [`FlightOptions::connect`] reads the result on a thread of its own, every
+//! for: a ticket, a dataset path, a command, a Flight SQL query or a Flight SQL service's
+//! list of tables (the `sql` feature, on by default). [`FlightOptions::connect`] reads the result on a thread of its own, every
 //! endpoint in order, and wakes the interface after each [`FlightEvent`]: the schema first,
 //! then batches as they arrive, then the end.
 //!

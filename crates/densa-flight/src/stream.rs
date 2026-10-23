@@ -603,6 +603,20 @@ fn descriptor(request: &FlightRequest) -> Result<FlightDescriptor, End> {
             };
             Ok(FlightDescriptor::new_cmd(command.as_any().encode_to_vec()))
         }
+        #[cfg(feature = "sql")]
+        FlightRequest::Tables => {
+            use arrow_flight::sql::{CommandGetTables, ProstMessageExt};
+            use prost::Message;
+            // Every table, without its schema (the columns are seen when it is opened).
+            let command = CommandGetTables {
+                catalog: None,
+                db_schema_filter_pattern: None,
+                table_name_filter_pattern: None,
+                table_types: Vec::new(),
+                include_schema: false,
+            };
+            Ok(FlightDescriptor::new_cmd(command.as_any().encode_to_vec()))
+        }
         FlightRequest::Ticket(_) => Err(End::Fatal("a ticket has no descriptor".to_owned())),
     }
 }

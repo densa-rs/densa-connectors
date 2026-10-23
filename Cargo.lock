@@ -4702,6 +4702,7 @@ dependencies = [
  "arrow-flight",
  "arrow-schema 60.0.0",
  "futures",
+ "prost",
  "tokio",
  "tokio-stream",
  "tonic",

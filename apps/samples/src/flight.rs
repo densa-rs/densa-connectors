@@ -1,13 +1,17 @@
 //! A local Arrow Flight service for the apps' demos and tests: any request's answer is the
-//! million web requests (a service log) in four endpoints, made as they are sent.
+//! million web requests (a service log) in four endpoints, made as they are sent, except
+//! Flight SQL's list of tables, which names them: `demo.public.requests`.
 
 use std::error::Error;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
+use arrow_array::{ArrayRef, RecordBatch, StringArray};
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
+use arrow_flight::sql::{Any, CommandGetTables};
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
@@ -19,6 +23,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 const ENDPOINTS: i64 = 4;
 const BATCH: i64 = 16_384;
+/// The ticket of the list of tables.
+const TABLES: &str = "tables";
 
 /// Starts a Flight service on a free local port, on a thread of its own, and returns its URL
 /// (`grpc://127.0.0.1:PORT`). Whatever is asked (a path, a command, a Flight SQL query), it
@@ -83,6 +89,26 @@ fn serve(requests: Requests) -> Result<String, Box<dyn Error>> {
     Ok(format!("grpc://{address}"))
 }
 
+/// Whether `descriptor` is Flight SQL's `CommandGetTables`.
+fn asks_for_tables(descriptor: &FlightDescriptor) -> bool {
+    use prost::Message;
+    Any::decode(&*descriptor.cmd)
+        .ok()
+        .and_then(|any| any.unpack::<CommandGetTables>().ok().flatten())
+        .is_some()
+}
+
+/// The service's one table, in the columns Flight SQL lists tables in.
+fn tables() -> Result<RecordBatch, arrow_schema::ArrowError> {
+    let text = |value: &str| Arc::new(StringArray::from(vec![value])) as ArrayRef;
+    RecordBatch::try_from_iter([
+        ("catalog_name", text("demo")),
+        ("db_schema_name", text("public")),
+        ("table_name", text("requests")),
+        ("table_type", text("TABLE")),
+    ])
+}
+
 /// Answers every query with the requests, a quarter per endpoint (the ticket is its index).
 struct Requests {
     rows: i64,
@@ -102,8 +128,12 @@ impl FlightService for Requests {
 
     async fn get_flight_info(
         &self,
-        _: Request<FlightDescriptor>,
+        request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
+        if asks_for_tables(&request.into_inner()) {
+            let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(TABLES));
+            return Ok(Response::new(FlightInfo::new().with_endpoint(endpoint)));
+        }
         let endpoints = (0..ENDPOINTS)
             .map(|part| FlightEndpoint::new().with_ticket(Ticket::new(part.to_string())))
             .collect();
@@ -115,6 +145,14 @@ impl FlightService for Requests {
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner().ticket;
+        if ticket == TABLES.as_bytes() {
+            let tables = futures::stream::iter([tables().map_err(Into::into)]);
+            let data = FlightDataEncoderBuilder::new()
+                .build(tables)
+                .map_err(Status::from)
+                .boxed();
+            return Ok(Response::new(data));
+        }
         let part: i64 = std::str::from_utf8(&ticket)
             .ok()
             .and_then(|text| text.parse().ok())
@@ -189,5 +227,39 @@ impl FlightService for Requests {
         _: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoExchangeStream>, Status> {
         Err(Status::unimplemented("do_exchange"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt};
+    use prost::Message;
+
+    use super::*;
+
+    #[test]
+    fn the_list_of_tables_is_told_from_queries() {
+        let tables = CommandGetTables {
+            catalog: None,
+            db_schema_filter_pattern: None,
+            table_name_filter_pattern: None,
+            table_types: Vec::new(),
+            include_schema: false,
+        };
+        let query = CommandStatementQuery {
+            query: "SELECT 1".to_owned(),
+            transaction_id: None,
+        };
+        let asked = |command: Vec<u8>| asks_for_tables(&FlightDescriptor::new_cmd(command));
+        assert!(asked(tables.as_any().encode_to_vec()));
+        assert!(!asked(query.as_any().encode_to_vec()));
+        assert!(!asked(b"anything".to_vec()));
+        let listed = super::tables().unwrap();
+        let schema = listed.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            ["catalog_name", "db_schema_name", "table_name", "table_type"]
+        );
     }
 }

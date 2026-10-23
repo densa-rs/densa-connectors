@@ -265,6 +265,36 @@ fn a_flight_sql_query_is_sent_as_a_statement_command() {
     );
 }
 
+#[cfg(feature = "sql")]
+#[test]
+fn a_flight_sql_service_is_asked_for_its_tables() {
+    use arrow_flight::sql::{Any, CommandGetTables};
+    use prost::Message;
+    let url = serve(Service {
+        do_get: Arc::new(|ticket, _| {
+            assert_eq!(ticket, b"tables");
+            Ok(encoded(vec![rows(0..2)]))
+        }),
+        get_info: Arc::new(|descriptor| {
+            let any = Any::decode(&*descriptor.cmd)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let command: CommandGetTables = any
+                .unpack()
+                .map_err(|e| Status::invalid_argument(e.to_string()))?
+                .ok_or_else(|| Status::invalid_argument("not GetTables"))?;
+            assert!(!command.include_schema, "names only");
+            assert_eq!(command.catalog, None, "every catalog");
+            let ticket = Ticket::new("tables");
+            Ok(FlightInfo::new().with_endpoint(FlightEndpoint::new().with_ticket(ticket)))
+        }),
+    });
+    let mut stream = FlightOptions::sql_tables(url).connect(|| {}).unwrap();
+    assert_eq!(
+        events(&mut stream),
+        ["schema sensor,celsius", "batch [0.0, 1.0]", "finished"]
+    );
+}
+
 #[test]
 fn an_empty_result_still_has_its_schema() {
     let url = serve(Service {

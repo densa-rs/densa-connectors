@@ -18,9 +18,19 @@ futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["net", "rt-multi-thread"], optional = true }
 tokio-stream = { version = "0.1", default-features = false, features = ["net"], optional = true }
 tonic = { workspace = true, optional = true }
+# Flight SQL's list of tables, decoded from the request (feature `flight`).
+prost = { version = "0.14", default-features = false, optional = true }
 
 [features]
-flight = ["dep:arrow-flight", "dep:futures", "dep:tokio", "dep:tokio-stream", "dep:tonic"]
+flight = [
+    "dep:arrow-flight",
+    "arrow-flight/flight-sql",
+    "dep:futures",
+    "dep:prost",
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:tonic",
+]
 
 [lints]
 workspace = true
