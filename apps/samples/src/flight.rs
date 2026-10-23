@@ -3,6 +3,7 @@
 
 use std::error::Error;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use arrow_flight::encode::FlightDataEncoderBuilder;
@@ -35,6 +36,26 @@ pub fn flight_server() -> Result<String, Box<dyn Error>> {
 /// # Errors
 /// If no local port can be had or the runtime cannot start.
 pub fn flight_server_of(rows: i64) -> Result<String, Box<dyn Error>> {
+    serve(Requests {
+        rows,
+        fail_second: AtomicBool::new(false),
+    })
+}
+
+/// [`flight_server_of`] whose second `DoGet` (the first of the second quarter) fails once, as
+/// a service that is briefly unavailable does: a client that asks again gets the rest (for
+/// tests of starting a result over).
+///
+/// # Errors
+/// If no local port can be had or the runtime cannot start.
+pub fn flight_server_failing_once(rows: i64) -> Result<String, Box<dyn Error>> {
+    serve(Requests {
+        rows,
+        fail_second: AtomicBool::new(true),
+    })
+}
+
+fn serve(requests: Requests) -> Result<String, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -51,7 +72,7 @@ pub fn flight_server_of(rows: i64) -> Result<String, Box<dyn Error>> {
                 };
                 let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
                 let served = Server::builder()
-                    .add_service(FlightServiceServer::new(Requests { rows }))
+                    .add_service(FlightServiceServer::new(requests))
                     .serve_with_incoming(incoming)
                     .await;
                 if let Err(error) = served {
@@ -65,6 +86,8 @@ pub fn flight_server_of(rows: i64) -> Result<String, Box<dyn Error>> {
 /// Answers every query with the requests, a quarter per endpoint (the ticket is its index).
 struct Requests {
     rows: i64,
+    /// Whether the second quarter's first `DoGet` is still to fail.
+    fail_second: AtomicBool,
 }
 
 #[tonic::async_trait]
@@ -97,6 +120,10 @@ impl FlightService for Requests {
             .and_then(|text| text.parse().ok())
             .filter(|part| (0..ENDPOINTS).contains(part))
             .ok_or_else(|| Status::not_found("no such part"))?;
+        // Relaxed: a flag for tests, guarding no other data.
+        if part == 1 && self.fail_second.swap(false, Ordering::Relaxed) {
+            return Err(Status::unavailable("briefly unavailable"));
+        }
         let rows = self.rows.max(0);
         let (start, end) = (part * rows / ENDPOINTS, (part + 1) * rows / ENDPOINTS);
         let batches = futures::stream::iter((start..end).step_by(BATCH as usize))
