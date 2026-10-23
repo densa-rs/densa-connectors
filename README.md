@@ -9,8 +9,8 @@ Connectors live apart from densa's core crates because the formats and protocols
 bring large dependency trees of their own.
 
 > **Status: 0.x, experimental.** These crates are not on crates.io yet (take them from this
-> repository). Until densa's next release, the apps use densa's main branch (pinned in
-> `Cargo.lock`); the connectors themselves do not depend on densa.
+> repository). The apps use densa 0.2 from crates.io; the connectors themselves do not depend
+> on densa.
 
 ## Crates
 
