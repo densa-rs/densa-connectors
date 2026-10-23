@@ -10,10 +10,14 @@ pub const SENSORS: u64 = 500;
 
 /// Where the sensors are.
 const SITES: [&str; 6] = ["north", "south", "east", "west", "harbor", "airfield"];
+/// Temperatures rise and fall together over this many milliseconds, by up to [`SWING`].
+const PERIOD_MS: f64 = 60_000.0;
+const SWING: f64 = 3.0;
 
 /// Starts a server on a free local port sending readings of [`SENSORS`] sensors, a hundred
 /// every 20 ms, as text messages of JSON objects (one per line): `sensor` (`s-0042`), `site`,
-/// `celsius`, `humidity`, `ok` and `time` (milliseconds since the epoch). Returns its URL;
+/// `celsius` (rising and falling over each minute, so charts of it move), `humidity`, `ok`
+/// and `time` (milliseconds since the epoch). Returns its URL;
 /// the server runs until the process ends, each connection on a thread of its own.
 ///
 /// # Errors
@@ -62,7 +66,9 @@ fn reading(next: &mut impl FnMut() -> f64, now: u128) -> String {
     let sensor = (next() * SENSORS as f64) as u64;
     // Lossless: an index below 6.
     let site = SITES[(sensor % 6) as usize];
-    let base = 15.0 + (sensor % 17) as f64;
+    // Lossless enough: milliseconds within a period.
+    let phase = (now % PERIOD_MS as u128) as f64 / PERIOD_MS;
+    let base = 15.0 + (sensor % 17) as f64 + SWING * (phase * std::f64::consts::TAU).sin();
     let celsius = base + (next() - 0.5) * 4.0;
     let humidity = 30.0 + next() * 50.0;
     format!(
@@ -86,6 +92,27 @@ mod tests {
             let sensor: u64 = digits.parse().unwrap();
             assert!(sensor < SENSORS);
         }
+    }
+
+    #[test]
+    fn temperatures_swing_over_a_minute() {
+        let mean = |now| {
+            let mut next = random(2);
+            let total: f64 = (0..2_000)
+                .map(|_| {
+                    let row = reading(&mut next, now);
+                    let at = row.find("celsius\":").unwrap() + 9;
+                    let end = at + row[at..].find(',').unwrap();
+                    row[at..end].parse::<f64>().unwrap()
+                })
+                .sum();
+            total / 2_000.0
+        };
+        let (rising, falling) = (mean(15_000), mean(45_000));
+        assert!(
+            rising - falling > 2.0 * SWING - 0.5,
+            "{rising} vs {falling}"
+        );
     }
 
     #[test]
