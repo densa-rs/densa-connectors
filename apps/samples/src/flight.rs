@@ -16,7 +16,6 @@ use futures::{StreamExt, TryStreamExt};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-const ROWS: i64 = crate::REQUESTS;
 const ENDPOINTS: i64 = 4;
 const BATCH: i64 = 16_384;
 
@@ -28,6 +27,14 @@ const BATCH: i64 = 16_384;
 /// # Errors
 /// If no local port can be had or the runtime cannot start.
 pub fn flight_server() -> Result<String, Box<dyn Error>> {
+    flight_server_of(crate::REQUESTS)
+}
+
+/// [`flight_server`] answering with the first `rows` requests (for tests).
+///
+/// # Errors
+/// If no local port can be had or the runtime cannot start.
+pub fn flight_server_of(rows: i64) -> Result<String, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -44,7 +51,7 @@ pub fn flight_server() -> Result<String, Box<dyn Error>> {
                 };
                 let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
                 let served = Server::builder()
-                    .add_service(FlightServiceServer::new(Requests))
+                    .add_service(FlightServiceServer::new(Requests { rows }))
                     .serve_with_incoming(incoming)
                     .await;
                 if let Err(error) = served {
@@ -56,7 +63,9 @@ pub fn flight_server() -> Result<String, Box<dyn Error>> {
 }
 
 /// Answers every query with the requests, a quarter per endpoint (the ticket is its index).
-struct Requests;
+struct Requests {
+    rows: i64,
+}
 
 #[tonic::async_trait]
 impl FlightService for Requests {
@@ -88,7 +97,8 @@ impl FlightService for Requests {
             .and_then(|text| text.parse().ok())
             .filter(|part| (0..ENDPOINTS).contains(part))
             .ok_or_else(|| Status::not_found("no such part"))?;
-        let (start, end) = (part * ROWS / ENDPOINTS, (part + 1) * ROWS / ENDPOINTS);
+        let rows = self.rows.max(0);
+        let (start, end) = (part * rows / ENDPOINTS, (part + 1) * rows / ENDPOINTS);
         let batches = futures::stream::iter((start..end).step_by(BATCH as usize))
             .map(move |first| crate::requests(first, (first + BATCH).min(end)).map_err(Into::into));
         let data = FlightDataEncoderBuilder::new()
