@@ -7,7 +7,9 @@ mod flight;
 mod readings;
 
 #[cfg(feature = "flight")]
-pub use flight::{flight_server, flight_server_failing_once, flight_server_of};
+pub use flight::{
+    flight_server, flight_server_failing_once, flight_server_of, flight_server_without_schemas,
+};
 pub use readings::{readings_server, SENSORS};
 
 use std::sync::Arc;

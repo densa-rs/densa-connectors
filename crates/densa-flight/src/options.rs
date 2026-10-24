@@ -17,10 +17,10 @@ pub(crate) enum FlightRequest {
     /// each endpoint.
     #[cfg(feature = "sql")]
     Sql(String),
-    /// The tables a Flight SQL service has: `GetFlightInfo` of a `CommandGetTables`, then
-    /// `DoGet` of each endpoint.
+    /// The tables a Flight SQL service has: `GetFlightInfo` of a `CommandGetTables` (asking
+    /// for their schemas too if `schemas`), then `DoGet` of each endpoint.
     #[cfg(feature = "sql")]
-    Tables,
+    Tables { schemas: bool },
 }
 
 /// How to read a Flight service's data: [`FlightOptions::ticket`], [`path`](Self::path),
@@ -69,10 +69,21 @@ impl FlightOptions {
 
     /// The tables of the Flight SQL service at `url`, a row each, in the columns Flight SQL
     /// gives them: `catalog_name`, `db_schema_name` (both may be null), `table_name` and
-    /// `table_type`.
+    /// `table_type`. [`sql_tables_with_schemas`](Self::sql_tables_with_schemas) asks for
+    /// their columns too.
     #[cfg(feature = "sql")]
     pub fn sql_tables(url: impl Into<String>) -> Self {
-        Self::new(url, FlightRequest::Tables)
+        Self::new(url, FlightRequest::Tables { schemas: false })
+    }
+
+    /// [`sql_tables`](Self::sql_tables) with each table's schema too, in a binary
+    /// `table_schema` column after the others: the schema as Arrow IPC bytes, which
+    /// `arrow_ipc::convert::try_schema_from_ipc_buffer` reads. Finding every table's
+    /// columns can take a service longer than listing their names, and some services
+    /// refuse to: ask for the names alone then.
+    #[cfg(feature = "sql")]
+    pub fn sql_tables_with_schemas(url: impl Into<String>) -> Self {
+        Self::new(url, FlightRequest::Tables { schemas: true })
     }
 
     fn new(url: impl Into<String>, request: FlightRequest) -> Self {

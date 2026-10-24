@@ -4700,6 +4700,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array 60.0.0",
  "arrow-flight",
+ "arrow-ipc 60.0.0",
  "arrow-schema 60.0.0",
  "futures",
  "prost",

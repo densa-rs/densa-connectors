@@ -5,10 +5,9 @@
 use std::error::Error;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 
-use arrow_array::{ArrayRef, RecordBatch, StringArray};
+use arrow_array::RecordBatch;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::sql::{Any, CommandGetTables};
@@ -25,6 +24,8 @@ const ENDPOINTS: i64 = 4;
 const BATCH: i64 = 16_384;
 /// The ticket of the list of tables.
 const TABLES: &str = "tables";
+/// The ticket of the list of tables with their schemas.
+const TABLES_WITH_SCHEMAS: &str = "tables with schemas";
 
 /// Starts a Flight service on a free local port, on a thread of its own, and returns its URL
 /// (`grpc://127.0.0.1:PORT`). Whatever is asked (a path, a command, a Flight SQL query), it
@@ -45,6 +46,7 @@ pub fn flight_server_of(rows: i64) -> Result<String, Box<dyn Error>> {
     serve(Requests {
         rows,
         fail_second: AtomicBool::new(false),
+        schemas: true,
     })
 }
 
@@ -58,6 +60,21 @@ pub fn flight_server_failing_once(rows: i64) -> Result<String, Box<dyn Error>> {
     serve(Requests {
         rows,
         fail_second: AtomicBool::new(true),
+        schemas: true,
+    })
+}
+
+/// [`flight_server_of`] that refuses to list its tables with their schemas, as a service
+/// that cannot find every table's columns does: listing only their names works (for tests
+/// of asking again for less).
+///
+/// # Errors
+/// If no local port can be had or the runtime cannot start.
+pub fn flight_server_without_schemas(rows: i64) -> Result<String, Box<dyn Error>> {
+    serve(Requests {
+        rows,
+        fail_second: AtomicBool::new(false),
+        schemas: false,
     })
 }
 
@@ -89,24 +106,28 @@ fn serve(requests: Requests) -> Result<String, Box<dyn Error>> {
     Ok(format!("grpc://{address}"))
 }
 
-/// Whether `descriptor` is Flight SQL's `CommandGetTables`.
-fn asks_for_tables(descriptor: &FlightDescriptor) -> bool {
+/// Flight SQL's `CommandGetTables`, if `descriptor` is one.
+fn tables_command(descriptor: &FlightDescriptor) -> Option<CommandGetTables> {
     use prost::Message;
     Any::decode(&*descriptor.cmd)
         .ok()
         .and_then(|any| any.unpack::<CommandGetTables>().ok().flatten())
-        .is_some()
 }
 
-/// The service's one table, in the columns Flight SQL lists tables in.
-fn tables() -> Result<RecordBatch, arrow_schema::ArrowError> {
-    let text = |value: &str| Arc::new(StringArray::from(vec![value])) as ArrayRef;
-    RecordBatch::try_from_iter([
-        ("catalog_name", text("demo")),
-        ("db_schema_name", text("public")),
-        ("table_name", text("requests")),
-        ("table_type", text("TABLE")),
-    ])
+/// The service's one table, in the columns Flight SQL lists tables in: with its schema
+/// (as Flight SQL encodes it) if `schemas`.
+fn tables(schemas: bool) -> arrow_flight::error::Result<RecordBatch> {
+    let command = CommandGetTables {
+        catalog: None,
+        db_schema_filter_pattern: None,
+        table_name_filter_pattern: None,
+        table_types: Vec::new(),
+        include_schema: schemas,
+    };
+    let mut tables = command.into_builder();
+    let schema = crate::requests(0, 0)?.schema();
+    tables.append("demo", "public", "requests", "TABLE", &schema)?;
+    tables.build()
 }
 
 /// Answers every query with the requests, a quarter per endpoint (the ticket is its index).
@@ -114,6 +135,8 @@ struct Requests {
     rows: i64,
     /// Whether the second quarter's first `DoGet` is still to fail.
     fail_second: AtomicBool,
+    /// Whether the list of tables can come with their schemas.
+    schemas: bool,
 }
 
 #[tonic::async_trait]
@@ -130,8 +153,15 @@ impl FlightService for Requests {
         &self,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        if asks_for_tables(&request.into_inner()) {
-            let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(TABLES));
+        if let Some(asked) = tables_command(&request.into_inner()) {
+            if asked.include_schema && !self.schemas {
+                return Err(Status::unimplemented("tables with their schemas"));
+            }
+            let ticket = match asked.include_schema {
+                true => TABLES_WITH_SCHEMAS,
+                false => TABLES,
+            };
+            let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(ticket));
             return Ok(Response::new(FlightInfo::new().with_endpoint(endpoint)));
         }
         let endpoints = (0..ENDPOINTS)
@@ -145,8 +175,9 @@ impl FlightService for Requests {
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner().ticket;
-        if ticket == TABLES.as_bytes() {
-            let tables = futures::stream::iter([tables().map_err(Into::into)]);
+        let schemas = ticket == TABLES_WITH_SCHEMAS.as_bytes();
+        if schemas || ticket == TABLES.as_bytes() {
+            let tables = futures::stream::iter([tables(schemas)]);
             let data = FlightDataEncoderBuilder::new()
                 .build(tables)
                 .map_err(Status::from)
@@ -232,6 +263,7 @@ impl FlightService for Requests {
 
 #[cfg(test)]
 mod tests {
+    use arrow_array::BinaryArray;
     use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt};
     use prost::Message;
 
@@ -250,16 +282,24 @@ mod tests {
             query: "SELECT 1".to_owned(),
             transaction_id: None,
         };
-        let asked = |command: Vec<u8>| asks_for_tables(&FlightDescriptor::new_cmd(command));
-        assert!(asked(tables.as_any().encode_to_vec()));
-        assert!(!asked(query.as_any().encode_to_vec()));
-        assert!(!asked(b"anything".to_vec()));
-        let listed = super::tables().unwrap();
-        let schema = listed.schema();
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(
-            names,
-            ["catalog_name", "db_schema_name", "table_name", "table_type"]
-        );
+        let asked = |command: Vec<u8>| tables_command(&FlightDescriptor::new_cmd(command));
+        assert_eq!(asked(tables.as_any().encode_to_vec()), Some(tables));
+        assert_eq!(asked(query.as_any().encode_to_vec()), None);
+        assert_eq!(asked(b"anything".to_vec()), None);
+        let names = |batch: RecordBatch| -> Vec<String> {
+            let schema = batch.schema();
+            schema.fields().iter().map(|f| f.name().clone()).collect()
+        };
+        let listed = ["catalog_name", "db_schema_name", "table_name", "table_type"];
+        assert_eq!(names(super::tables(false).unwrap()), listed);
+        let with_schemas = super::tables(true).unwrap();
+        assert_eq!(names(with_schemas.clone()).last().unwrap(), "table_schema");
+        let encoded = with_schemas
+            .column(4)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let schema = arrow_ipc::convert::try_schema_from_ipc_buffer(encoded.value(0)).unwrap();
+        assert_eq!(schema, *crate::requests(0, 0).unwrap().schema());
     }
 }

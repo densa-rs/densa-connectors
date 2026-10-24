@@ -21,6 +21,10 @@ tonic = { workspace = true, optional = true }
 # Flight SQL's list of tables, decoded from the request (feature `flight`).
 prost = { version = "0.14", default-features = false, optional = true }
 
+[dev-dependencies]
+# Reads the schemas in the list of tables back.
+arrow-ipc.workspace = true
+
 [features]
 flight = [
     "dep:arrow-flight",

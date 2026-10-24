@@ -18,7 +18,7 @@ bring large dependency trees of their own.
 |---|---|
 | [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready |
 | [`densa-ws`](crates/densa-ws) | WebSocket streams of JSON rows (columns given, or read from the first message) or Arrow IPC as record batches: rows gathered into batches, handed over within a set delay, reconnecting with growing waits and re-sending subscriptions, TLS through rustls |
-| [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands, SQL queries and a service's list of tables, every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app |
+| [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands, SQL queries and a service's list of tables (with their schemas if asked), every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app |
 | [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped (needs Rust 1.94, DataFusion's minimum) |
 
 ## A file in a live table
