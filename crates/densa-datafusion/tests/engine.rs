@@ -736,3 +736,35 @@ fn empty_batches_are_not_handed_over() {
     );
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
 }
+
+/// `std::fs::canonicalize` gives a verbatim path on Windows (`\\?\C:\...`), which DataFusion
+/// cannot make a URL of: the engine takes it all the same.
+#[cfg(windows)]
+#[test]
+fn a_file_named_by_its_canonical_path_is_registered() {
+    let path =
+        std::env::temp_dir().join(format!("densa-df-{}-canonical.parquet", std::process::id()));
+    let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(0..10));
+    let batch = RecordBatch::try_from_iter([("id", ids)]).unwrap();
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(File::create(&path).unwrap(), batch.schema(), None)
+            .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let canonical = std::fs::canonicalize(&path).unwrap();
+    assert!(
+        canonical.to_string_lossy().starts_with(r"\\?\"),
+        "{}",
+        canonical.display()
+    );
+    let engine = Engine::with_threads(1).unwrap();
+    let registered = engine.register_parquet("canonical", &canonical);
+    let (_, batches, end) = collect(engine.sql("SELECT count(*) FROM canonical").run(|| {}));
+    let _ = std::fs::remove_file(&path);
+    registered.unwrap();
+    end.unwrap();
+    assert_eq!(
+        batches[0].column(0).as_primitive::<Int64Type>().value(0),
+        10
+    );
+}

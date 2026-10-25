@@ -319,11 +319,49 @@ impl fmt::Debug for Engine {
     }
 }
 
-/// `path` as the text DataFusion takes.
+/// `path` as the text DataFusion takes. On Windows a verbatim path (`\\?\C:\data`, as
+/// `std::fs::canonicalize` gives) loses its prefix: DataFusion makes a URL of the path, and
+/// the URL parser panics on one.
 fn text(path: &Path) -> Result<String, EngineError> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| EngineError::Register(format!("{} is not valid Unicode", path.display())))
+    let text = path
+        .to_str()
+        .ok_or_else(|| EngineError::Register(format!("{} is not valid Unicode", path.display())))?;
+    Ok(match cfg!(windows) {
+        true => plain(text),
+        false => text.to_owned(),
+    })
+}
+
+/// A Windows path without a verbatim prefix: `\\?\C:\data` as `C:\data`, and
+/// `\\?\UNC\server\share` as `\\server\share`.
+fn plain(text: &str) -> String {
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
+    text.strip_prefix(r"\\?\").unwrap_or(text).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain;
+
+    #[test]
+    fn a_verbatim_windows_path_loses_its_prefix_and_others_stay() {
+        assert_eq!(
+            plain(r"\\?\C:\data\trips.parquet"),
+            r"C:\data\trips.parquet"
+        );
+        assert_eq!(
+            plain(r"\\?\UNC\server\share\trips"),
+            r"\\server\share\trips"
+        );
+        assert_eq!(plain(r"C:\data\trips.parquet"), r"C:\data\trips.parquet");
+        assert_eq!(plain(r"\\server\share\trips"), r"\\server\share\trips");
+        assert_eq!(
+            plain("/home/data/trips.parquet"),
+            "/home/data/trips.parquet"
+        );
+    }
 }
 
 /// What a running query needs.
