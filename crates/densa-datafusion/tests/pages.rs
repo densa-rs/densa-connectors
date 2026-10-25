@@ -158,7 +158,7 @@ fn a_file_without_keys_is_paged_in_its_own_order() {
 }
 
 #[test]
-fn a_folder_of_files_without_keys_is_read_in_one_order() {
+fn a_folder_of_files_needs_keys_and_with_them_pages_each_row_once() {
     let dir = std::env::temp_dir().join(format!("densa-datafusion-folder-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (part, ids) in [(0, 0..400), (1, 400..700), (2, 700..ROWS)] {
@@ -167,22 +167,26 @@ fn a_folder_of_files_without_keys_is_read_in_one_order() {
         writer.write(&rows(ids)).unwrap();
         writer.close().unwrap();
     }
-    // Three files, which the engine's four threads would read side by side.
     let engine = Engine::with_threads(4).unwrap();
     engine.register_parquet("d", &dir).unwrap();
-    let mut pages = engine.pages("SELECT * FROM d", &[]).unwrap();
-    let mut read = || {
-        let mut together = Vec::new();
-        for offset in (0..1_000).step_by(70) {
-            together.extend(ids(&pages.page(&PageQuery::new(), offset, 70).unwrap()));
-        }
-        together
-    };
-    let (first, second) = (read(), read());
-    assert_eq!(first, second, "one order from one read to the next");
-    let mut sorted = first;
-    sorted.sort_unstable();
-    assert_eq!(sorted, (0..ROWS).collect::<Vec<_>>(), "each row once");
+    // The files are listed in no set order (concurrently): one query may read them in another
+    // than the next. So too when the scan is below another step (a filter).
+    for query in ["SELECT * FROM d", "SELECT * FROM d WHERE id % 2 = 0"] {
+        let reason = match engine.pages(query, &[]) {
+            Err(EngineError::Query(reason)) => reason,
+            other => panic!("{query}: {other:?}"),
+        };
+        assert!(
+            reason.contains("3 files, listed in no set order") && reason.contains("give keys"),
+            "{query}: {reason}"
+        );
+    }
+    let mut pages = engine.pages("SELECT * FROM d", &["id"]).unwrap();
+    let mut together = Vec::new();
+    for offset in (0..1_000).step_by(70) {
+        together.extend(ids(&pages.page(&PageQuery::new(), offset, 70).unwrap()));
+    }
+    assert_eq!(together, (0..ROWS).collect::<Vec<_>>());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -237,15 +241,18 @@ fn a_table_gone_since_fails_the_calls_that_read_it() {
 
 #[test]
 fn without_keys_a_query_read_in_parallel_is_refused() {
-    // `t` is ten batches spread over four partitions: read side by side, in no set order.
-    let reason = match engine().pages("SELECT * FROM t", &[]) {
-        Err(EngineError::Query(reason)) => reason,
-        other => panic!("{other:?}"),
-    };
-    assert!(
-        reason.contains("4 partitions") && reason.contains("give keys"),
-        "{reason}"
-    );
+    // `t` is ten batches spread over four partitions: read side by side, in no set order, even
+    // when a step above gathers them into one (a LIMIT of the query's own).
+    for query in ["SELECT * FROM t", "SELECT * FROM t LIMIT 500"] {
+        let reason = match engine().pages(query, &[]) {
+            Err(EngineError::Query(reason)) => reason,
+            other => panic!("{query}: {other:?}"),
+        };
+        assert!(
+            reason.contains("4 partitions") && reason.contains("give keys"),
+            "{query}: {reason}"
+        );
+    }
     // One batch, one partition: its own order holds.
     let engine = Engine::with_threads(4).unwrap();
     engine

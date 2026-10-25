@@ -206,8 +206,9 @@ it). Sort the model instead, as a click on a title does.
 
 The keys follow the grid's sort in every `ORDER BY`, so rows that tie keep one order from page
 to page. Without keys, DataFusion takes a query's own order only when the query reads as one
-stream (a file scan) and refuses the others; a Flight SQL service may change the order between
-pages.
+stream (one file, a table registered from one batch) and refuses the others, a folder of files
+among them (its files are listed in no set order); a Flight SQL service may change the order
+between pages.
 
 A page deep in a large result costs the engine a read of the result up to it, and an ordered
 page a sort of those rows, held in memory: fast for results of millions of rows, slower the

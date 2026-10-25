@@ -7,6 +7,8 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::arrow::array::{Array, AsArray, RecordBatch as DfBatch};
 use datafusion::arrow::datatypes::{DataType as DfDataType, Int64Type, UInt64Type};
+use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig};
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::DataFusionError;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::session_state::SessionStateBuilder;
@@ -35,7 +37,8 @@ impl Engine {
     /// `keys` are columns that tell the result's rows apart (an id): each page is ordered by
     /// the columns the grid sorts by and then by them, so rows keep one order from page to
     /// page. Without keys, the result's own order is taken, which only a query read as one
-    /// stream has (a file scan, a table registered from one batch); refused otherwise.
+    /// stream has (one file, a table registered from one batch); refused otherwise (a folder
+    /// of files is listed in no set order).
     ///
     /// Costs: a page deep in a large result costs a read of the result up to it, and an ordered
     /// page (sorted, or with keys) a sort of those rows, held in memory: at most 2 GiB unless
@@ -146,7 +149,7 @@ impl SqlPages {
                  it"
             ))
         };
-        let frame = planned(
+        planned(
             &self.runtime,
             &self.context,
             &self.page_sql(&PageQuery::new(), 1, 1),
@@ -155,19 +158,23 @@ impl SqlPages {
         if !self.keys.is_empty() {
             return Ok(());
         }
+        // The whole result: a LIMIT would leave out of the plan the files it needs no rows of.
+        let whole = format!("SELECT * FROM (\n{}\n) AS densa_rows", self.query);
+        let frame = planned(&self.runtime, &self.context, &whole).map_err(EngineError::Query)?;
         let plan = self
             .runtime
             .block_on(frame.create_physical_plan())?
             .ok_or_else(|| EngineError::Query("planning panicked".to_owned()))?
             .map_err(|error| EngineError::Query(error.to_string()))?;
-        match widest(plan.as_ref()) {
-            1 => Ok(()),
-            parts => Err(EngineError::Query(format!(
-                "without keys the query's rows need an order of their own, and these come from \
-                 {parts} partitions read side by side: give keys, columns that tell its rows \
-                 apart"
-            ))),
-        }
+        let apart = match (widest(plan.as_ref()), most_files(plan.as_ref())) {
+            (1, 0 | 1) => return Ok(()),
+            (1, files) => format!("{files} files, listed in no set order"),
+            (parts, _) => format!("{parts} partitions read side by side"),
+        };
+        Err(EngineError::Query(format!(
+            "without keys the query's rows need an order of their own, and these come from \
+             {apart}: give keys, columns that tell its rows apart"
+        )))
     }
 
     /// Runs `sql` to its end: the batches it gave, in DataFusion's Arrow.
@@ -251,8 +258,8 @@ fn planned(runtime: &Workers, context: &SessionContext, sql: &str) -> Result<Dat
 }
 
 /// A copy of `context` for pages: its tables (a default catalog made anew would replace the
-/// engine's own, for both), `memory` bytes for a query, and one partition if asked (a scan then
-/// keeps its own order from one page to the next).
+/// engine's own, for both), `memory` bytes for a query, and one partition if asked (a scan of
+/// one file then keeps its own order from one page to the next).
 fn session(
     context: &SessionContext,
     one_partition: bool,
@@ -292,6 +299,21 @@ fn dropped_order(plan: &LogicalPlan) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// The most files any one scan in `plan` reads: files are listed in no set order, so a scan of
+/// several can read them in another from one query to the next.
+fn most_files(plan: &dyn ExecutionPlan) -> usize {
+    let own = plan
+        .downcast_ref::<DataSourceExec>()
+        .and_then(|scan| scan.data_source().downcast_ref::<FileScanConfig>())
+        .map_or(0, |files| {
+            files.file_groups.iter().map(FileGroup::len).sum()
+        });
+    plan.children()
+        .into_iter()
+        .map(|child| most_files(child.as_ref()))
+        .fold(own, usize::max)
 }
 
 /// The most partitions any step of `plan` gives.
