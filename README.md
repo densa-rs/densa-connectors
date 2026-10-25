@@ -9,9 +9,8 @@ Connectors live apart from densa's core crates because the formats and protocols
 bring large dependency trees of their own.
 
 > **Status: 0.x, experimental.** These crates are not on crates.io yet (take them from this
-> repository). The apps use densa from its main branch (the commit pinned in `Cargo.lock`)
-> until densa's next release; the connectors depend on densa only through their `paged`
-> features.
+> repository). The apps use densa 0.2.5 from crates.io; the connectors depend on densa only
+> through their `paged` features.
 
 ## Crates
 
@@ -231,8 +230,7 @@ deeper into billions. DataFusion's pages hold 2 GiB at most unless `SqlPages::wi
 says otherwise, past which a page fails, saying so; each Flight SQL call has five minutes unless
 `FlightOptions::call_timeout` says otherwise.
 
-The `paged` features need densa newer than 0.2.4: until its next release, take densa from its
-main branch with a `[patch.crates-io]` section, as this workspace's `Cargo.toml` does.
+The `paged` features need densa 0.2.5 or newer.
 
 ## Applications
 
