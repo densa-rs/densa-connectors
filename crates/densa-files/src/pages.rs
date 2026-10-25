@@ -102,6 +102,17 @@ impl FilePages {
         self.footer.rows()
     }
 
+    /// How many bytes its rows take uncompressed, as its footer says: closer than the file's
+    /// size to what loading it whole would hold (text kept in dictionaries takes more once
+    /// read).
+    pub fn data_bytes(&self) -> u64 {
+        let groups = self.footer.metadata.metadata().row_groups();
+        groups
+            .iter()
+            .map(|group| u64::try_from(group.total_byte_size()).unwrap_or(0))
+            .sum()
+    }
+
     /// Whether the file says where each of its pages starts (an offset index, for every row
     /// group). The pages before the rows asked for are then skipped without reading anything
     /// of them. Without one, each one's header is read instead, or for a nested column (a list,
@@ -162,25 +173,26 @@ impl FilePages {
     }
 
     /// Reads the footer anew if the file was written to since it was read, so its rows can be
-    /// read again ([`row_count`](PageSource::row_count) does it first, so a model's `refresh`
-    /// does too).
+    /// read again; whether it was ([`row_count`](PageSource::row_count) does it first, so a
+    /// model's `refresh` does too). Asked often, it tells when a file changes: it only looks
+    /// at the file's length and times until they move.
     ///
     /// # Errors
     /// [`FileError::ColumnsChanged`] if its columns are not the ones it had (open it again),
     /// [`FileError::Io`] if it cannot be read, [`FileError::Invalid`] if it is not valid
     /// Parquet.
-    pub fn reload(&mut self) -> Result<(), FileError> {
+    pub fn reload(&mut self) -> Result<bool, FileError> {
         let file = File::open(&self.path)?;
         let stamp = Stamp::of(&file)?;
         if stamp == self.footer.stamp {
-            return Ok(());
+            return Ok(false);
         }
         let footer = Footer::load(&file, stamp)?;
         if !same_columns(footer.metadata.schema(), &self.columns) {
             return Err(FileError::ColumnsChanged(self.path.clone()));
         }
         self.footer = footer;
-        Ok(())
+        Ok(true)
     }
 }
 

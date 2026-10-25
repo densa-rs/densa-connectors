@@ -11,12 +11,21 @@ use std::time::Duration;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::common::TableReference;
+use datafusion::datasource::file_format::options::ReadOptions;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::datasource::MemTable;
+use datafusion::error::DataFusionError;
 use datafusion::execution::context::SQLOptions;
+use datafusion::execution::memory_pool::FairSpillPool;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionConfig, SessionContext};
 use futures::{FutureExt, StreamExt};
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
+use url::Url;
 
 use crate::bridge::{batch_in, batches_out, schema_in};
 use crate::numbers::RowNumbers;
@@ -25,6 +34,8 @@ use crate::numbers::RowNumbers;
 const QUEUED: usize = 64;
 /// How often a full queue is looked at again (the runtime's other work goes on meanwhile).
 const QUEUE_FULL_TICK: Duration = Duration::from_millis(2);
+/// The most a sorting partition sets aside to merge what it spilled: DataFusion's default.
+const MERGE_ROOM: usize = 10 << 20;
 
 /// A DataFusion session with tables registered by name, and the runtime its queries run on.
 ///
@@ -36,6 +47,8 @@ pub struct Engine {
     pub(crate) runtime: Arc<Workers>,
     pub(crate) context: SessionContext,
     threads: usize,
+    /// The memory its queries may hold between them, if limited.
+    memory: Option<usize>,
 }
 
 /// The runtime, shut down without waiting when its last owner goes: an engine or a query
@@ -97,11 +110,48 @@ impl Engine {
             runtime: Arc::new(Workers(Some(runtime))),
             context: SessionContext::new_with_config(config),
             threads,
+            memory: None,
         })
     }
 
+    /// The engine with its queries held to `bytes` of memory between them (by default they
+    /// are not held at all). Sorts and aggregates that would hold more spill to files in the
+    /// temporary folder; what cannot spill (a join's table, say) fails, saying so. Tables
+    /// already registered are kept.
+    ///
+    /// # Errors
+    /// [`EngineError::Runtime`] if the memory pool cannot be made.
+    pub fn with_memory_limit(mut self, bytes: usize) -> Result<Self, EngineError> {
+        let state = self.context.state();
+        // Each partition that sorts sets aside room to merge what it spilled (10 MiB unless
+        // set): at most a quarter of the limit between them, so smaller limits still sort.
+        let merge_room = (bytes / 4 / self.threads.max(1)).min(MERGE_ROOM);
+        // Made anew, the default catalog would replace the shared one holding the tables.
+        let config = state
+            .config()
+            .clone()
+            .with_sort_spill_reservation_bytes(merge_room)
+            .with_create_default_catalog_and_schema(false);
+        // Shared out among the parts of a query that can spill, so one partition's sort
+        // cannot take it all and leave the next none to start with.
+        let pool = Arc::new(FairSpillPool::new(bytes));
+        let runtime = RuntimeEnvBuilder::from_runtime_env(state.runtime_env())
+            .with_memory_pool(pool)
+            .build_arc()
+            .map_err(|error| EngineError::Runtime(error.to_string()))?;
+        let state = SessionStateBuilder::new_from_existing(state)
+            .with_config(config)
+            .with_runtime_env(runtime)
+            .build();
+        self.context = SessionContext::new_with_state(state);
+        self.memory = Some(bytes);
+        Ok(self)
+    }
+
     /// Registers the Parquet file (or directory of files) at `path` as table `name`, reading
-    /// its metadata before returning.
+    /// its metadata before returning. A file is read whatever its name ends in, and a name
+    /// is a name (`*`, `?` or `[` in it match nothing); a directory's files are those whose
+    /// names end in `.parquet`.
     ///
     /// Names are taken as they are: in SQL, a name with capitals, dots or spaces needs double
     /// quotes (`"Sales 2026"`), as unquoted names are folded to lowercase.
@@ -109,27 +159,56 @@ impl Engine {
     /// # Errors
     /// [`EngineError::Register`] if it cannot be read or the name is taken.
     pub fn register_parquet(&self, name: &str, path: impl AsRef<Path>) -> Result<(), EngineError> {
-        let path = text(path.as_ref())?;
-        let table = TableReference::bare(name);
-        let registering =
-            self.context
-                .register_parquet(table, &path, ParquetReadOptions::default());
-        self.block_on(registering)?
-            .map_err(|error| EngineError::Register(error.to_string()))
+        let (url, extension) = listed(path.as_ref(), ".parquet")?;
+        let options = ParquetReadOptions::default().file_extension(&extension);
+        self.register_listed(name, url, self.listing(&options))
     }
 
     /// Registers the CSV file (or directory of files) at `path` as table `name`, with a
-    /// header line and column types inferred from the first records. Names are taken as for
-    /// [`register_parquet`](Self::register_parquet).
+    /// header line and column types inferred from the first records. Files and names are
+    /// taken as for [`register_parquet`](Self::register_parquet) (a directory's files are
+    /// those whose names end in `.csv`).
     ///
     /// # Errors
     /// [`EngineError::Register`] if it cannot be read or the name is taken.
     pub fn register_csv(&self, name: &str, path: impl AsRef<Path>) -> Result<(), EngineError> {
-        let path = text(path.as_ref())?;
+        let (url, extension) = listed(path.as_ref(), ".csv")?;
+        let options = CsvReadOptions::new().file_extension(&extension);
+        self.register_listed(name, url, self.listing(&options))
+    }
+
+    /// `options` as the session's settings make them for a table.
+    fn listing<'a>(&self, options: &impl ReadOptions<'a>) -> ListingOptions {
+        let (config, table) = (
+            self.context.copied_config(),
+            self.context.copied_table_options(),
+        );
+        options.to_listing_options(&config, table)
+    }
+
+    /// Registers the files at `url`, read as `options` say, as table `name`.
+    fn register_listed(
+        &self,
+        name: &str,
+        url: ListingTableUrl,
+        options: ListingOptions,
+    ) -> Result<(), EngineError> {
         let table = TableReference::bare(name);
-        let registering = self
-            .context
-            .register_csv(table, &path, CsvReadOptions::new());
+        let url = url.with_table_ref(table.clone());
+        let context = self.context.clone();
+        let registering = async move {
+            let schema = options.infer_schema(&context.state(), &url).await?;
+            let config = ListingTableConfig::new(url)
+                .with_listing_options(options)
+                .with_schema(schema);
+            let cache = context
+                .runtime_env()
+                .cache_manager
+                .get_file_statistic_cache();
+            let listing = ListingTable::try_new(config)?.with_cache(cache);
+            context.register_table(table, Arc::new(listing))?;
+            Ok::<(), DataFusionError>(())
+        };
         self.block_on(registering)?
             .map_err(|error| EngineError::Register(error.to_string()))
     }
@@ -281,6 +360,7 @@ impl Query<'_> {
             query: self.query,
             row_numbers: self.row_numbers,
             options,
+            memory: self.engine.memory,
         };
         let task = runtime.spawn(async move {
             let mut sender = Sender { sender, wake };
@@ -332,6 +412,25 @@ fn text(path: &Path) -> Result<String, EngineError> {
     })
 }
 
+/// Where `path` is, for DataFusion: a URL made of the path itself, so a name with `*`, `?` or
+/// `[` is not taken for a pattern; and the end its files' names must have: none for a file
+/// (named, so read whatever its name ends in), `folder_extension` for the files of a folder.
+fn listed(path: &Path, folder_extension: &str) -> Result<(ListingTableUrl, String), EngineError> {
+    let unreadable =
+        |reason: String| EngineError::Register(format!("{}: {reason}", path.display()));
+    let absolute = std::path::absolute(path).map_err(|error| unreadable(error.to_string()))?;
+    let plain = text(&absolute)?;
+    let folder = absolute.is_dir();
+    let url = match folder {
+        true => Url::from_directory_path(&plain),
+        false => Url::from_file_path(&plain),
+    }
+    .map_err(|()| unreadable("no URL can be made of this path".to_owned()))?;
+    let url = ListingTableUrl::try_new(url, None).map_err(|error| unreadable(error.to_string()))?;
+    let extension = if folder { folder_extension } else { "" };
+    Ok((url, extension.to_owned()))
+}
+
 /// A Windows path without a verbatim prefix: `\\?\C:\data` as `C:\data`, and
 /// `\\?\UNC\server\share` as `\\server\share`.
 fn plain(text: &str) -> String {
@@ -341,34 +440,13 @@ fn plain(text: &str) -> String {
     text.strip_prefix(r"\\?\").unwrap_or(text).to_owned()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::plain;
-
-    #[test]
-    fn a_verbatim_windows_path_loses_its_prefix_and_others_stay() {
-        assert_eq!(
-            plain(r"\\?\C:\data\trips.parquet"),
-            r"C:\data\trips.parquet"
-        );
-        assert_eq!(
-            plain(r"\\?\UNC\server\share\trips"),
-            r"\\server\share\trips"
-        );
-        assert_eq!(plain(r"C:\data\trips.parquet"), r"C:\data\trips.parquet");
-        assert_eq!(plain(r"\\server\share\trips"), r"\\server\share\trips");
-        assert_eq!(
-            plain("/home/data/trips.parquet"),
-            "/home/data/trips.parquet"
-        );
-    }
-}
-
 /// What a running query needs.
 struct Job {
     query: String,
     row_numbers: Option<String>,
     options: SQLOptions,
+    /// The memory the engine allows its queries, if limited.
+    memory: Option<usize>,
 }
 
 impl Job {
@@ -382,11 +460,11 @@ impl Job {
         let frame = context
             .sql_with_options(&self.query, self.options)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| self.reason(error))?;
         let mut batches = frame
             .execute_stream()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| self.reason(error))?;
         let schema = schema_in(&batches.schema())?;
         let mut numbers = match &self.row_numbers {
             Some(name) => Some(RowNumbers::new(name, &schema)?),
@@ -397,7 +475,7 @@ impl Job {
             return Ok(false);
         }
         while let Some(batch) = batches.next().await {
-            let batch = batch.map_err(|error| error.to_string())?;
+            let batch = batch.map_err(|error| self.reason(error))?;
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -411,6 +489,19 @@ impl Job {
             }
         }
         Ok(true)
+    }
+
+    /// Why the query failed, as `error` says; one that needed more memory than the engine
+    /// allows says how much it allows, and where that is set.
+    fn reason(&self, error: DataFusionError) -> String {
+        match (self.memory, error.find_root()) {
+            (Some(bytes), DataFusionError::ResourcesExhausted(_)) => format!(
+                "{error}: the query needs more than the {bytes} bytes of memory the engine \
+                 allows its queries (Engine::with_memory_limit); ask for fewer rows or columns \
+                 to be held at once, or allow more"
+            ),
+            _ => error.to_string(),
+        }
     }
 }
 
@@ -566,3 +657,26 @@ impl fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+#[cfg(test)]
+mod tests {
+    use super::plain;
+
+    #[test]
+    fn a_verbatim_windows_path_loses_its_prefix_and_others_stay() {
+        assert_eq!(
+            plain(r"\\?\C:\data\trips.parquet"),
+            r"C:\data\trips.parquet"
+        );
+        assert_eq!(
+            plain(r"\\?\UNC\server\share\trips"),
+            r"\\server\share\trips"
+        );
+        assert_eq!(plain(r"C:\data\trips.parquet"), r"C:\data\trips.parquet");
+        assert_eq!(plain(r"\\server\share\trips"), r"\\server\share\trips");
+        assert_eq!(
+            plain("/home/data/trips.parquet"),
+            "/home/data/trips.parquet"
+        );
+    }
+}

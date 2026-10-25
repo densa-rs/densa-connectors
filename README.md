@@ -161,6 +161,12 @@ Queries only read: creating tables, writing files and changing settings need
 `Query::allow_changes`. DataFusion 55 is built on Arrow 59 and densa on Arrow 60: batches
 cross between the two as Arrow IPC.
 
+A file is registered whatever its name ends in (`.pq`, `.PARQUET`, none), and a name is a
+name: `*`, `?` and `[` in it are not patterns; a folder's files are those named `.parquet` (or
+`.csv`). Queries may hold as much memory as they need unless `Engine::with_memory_limit` says
+otherwise: sorts and aggregates then spill to the temporary folder, and what cannot spill (a
+join's table) fails, saying how much the engine allows.
+
 A densa live table is queried through a snapshot of its live rows: register it, and again
 whenever the query should see newer rows.
 

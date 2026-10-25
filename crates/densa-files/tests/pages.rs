@@ -285,10 +285,12 @@ fn a_file_written_to_is_noticed_and_read_anew_when_counted_again() {
     assert_eq!(pages.total_rows(), 500);
     assert_eq!(ids(&pages.read(0, 3).unwrap()), [5_000, 5_001, 5_002]);
     assert_eq!(ids(&pages.read(497, 10).unwrap()), [5_497, 5_498, 5_499]);
-    // So does `reload`, for a reader of its own.
+    // So does `reload`, for a reader of its own, saying whether the file changed.
+    assert!(!pages.reload().unwrap(), "read already");
     write(&path.0, &rows(7_000..7_100), true);
     assert!(matches!(pages.read(0, 3), Err(FileError::Changed(_))));
-    pages.reload().unwrap();
+    assert!(pages.reload().unwrap());
+    assert!(!pages.reload().unwrap());
     assert_eq!(pages.total_rows(), 100);
     assert_eq!(ids(&pages.read(0, 2).unwrap()), [7_000, 7_001]);
 }
@@ -410,6 +412,29 @@ fn a_file_with_two_columns_of_one_name_is_refused() {
     write(&path.0, &batch, true);
     let twice = OpenOptions::new().paged(&path.0);
     assert!(matches!(twice, Err(FileError::DuplicateColumn(name)) if name == "id"));
+}
+
+#[test]
+fn the_size_of_a_files_rows_is_told_uncompressed() {
+    let path = TempPath::new("size.parquet");
+    // One long value, again and again: snappy makes little of it.
+    let names: Vec<String> = (0..20_000).map(|_| "x".repeat(100)).collect();
+    let column: ArrayRef = Arc::new(StringArray::from(names));
+    let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+    let batch = RecordBatch::try_new(schema, vec![column]).unwrap();
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .set_dictionary_enabled(false)
+        .build();
+    let file = File::create(&path.0).unwrap();
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let pages = OpenOptions::new().paged(&path.0).unwrap();
+    let length = fs::metadata(&path.0).unwrap().len();
+    // 2 MB of text in the rows, much less on disk.
+    assert!(pages.data_bytes() >= 2_000_000, "{}", pages.data_bytes());
+    assert!(length * 4 < pages.data_bytes(), "{length} on disk");
 }
 
 #[test]

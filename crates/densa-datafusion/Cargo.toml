@@ -19,6 +19,8 @@ arrow-schema.workspace = true
 datafusion.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+# A file's URL made from its path alone, for DataFusion's listing tables.
+url = "2"
 # The `paged` feature: a query's rows a page at a time for densa's PagedModel.
 densa-arrow = { workspace = true, optional = true }
 

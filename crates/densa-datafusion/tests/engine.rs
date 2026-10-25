@@ -768,3 +768,101 @@ fn a_file_named_by_its_canonical_path_is_registered() {
         10
     );
 }
+
+/// Writes `ids` 0, 1, ... as a Parquet file at `path`.
+fn write_ids(path: &std::path::Path, rows: i64) {
+    let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(0..rows));
+    let batch = RecordBatch::try_from_iter([("id", ids)]).unwrap();
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(File::create(path).unwrap(), batch.schema(), None)
+            .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// The count `query` gives.
+fn count(engine: &Engine, query: &str) -> i64 {
+    let (_, batches, end) = collect(engine.sql(query).run(|| {}));
+    end.unwrap();
+    batches[0].column(0).as_primitive::<Int64Type>().value(0)
+}
+
+#[test]
+fn a_parquet_file_is_registered_whatever_its_name_ends_in_or_holds() {
+    let folder = std::env::temp_dir().join(format!("densa-df-{}-names", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    // `[1]` would be a pattern to DataFusion, matching `1` (Windows allows no `*` or `?`).
+    let names = [
+        "a.pq",
+        "b.parq",
+        "C.PARQUET",
+        "no extension",
+        "d [1].parquet",
+    ];
+    let engine = Engine::with_threads(1).unwrap();
+    for (at, name) in names.iter().enumerate() {
+        write_ids(&folder.join(name), 10 + at as i64);
+        let table = format!("t{at}");
+        let registered = engine.register_parquet(&table, folder.join(name));
+        assert!(registered.is_ok(), "{name}: {registered:?}");
+        let rows = count(&engine, &format!("SELECT count(*) FROM {table}"));
+        assert_eq!(rows, 10 + at as i64, "{name}");
+    }
+    // A folder's files are those named .parquet: of these, only the last.
+    engine.register_parquet("folder", &folder).unwrap();
+    assert_eq!(count(&engine, "SELECT count(*) FROM folder"), 14);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn a_memory_limit_keeps_the_tables_and_says_so_when_a_query_needs_more() {
+    let (schema, batches) = readings();
+    let engine = Engine::with_threads(2).unwrap();
+    engine
+        .register_batches("readings", &schema, &batches)
+        .unwrap();
+    let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(0..200_000));
+    let wide = RecordBatch::try_from_iter([("id", ids)]).unwrap();
+    engine
+        .register_batches("wide", &wide.schema(), std::slice::from_ref(&wide))
+        .unwrap();
+    let engine = engine.with_memory_limit(1 << 20).unwrap();
+    // Registered before: still there, and a small query runs.
+    let (_, rows, end) = collect(engine.sql("SELECT * FROM readings").run(|| {}));
+    end.unwrap();
+    assert!(!rows.is_empty());
+    // A join's table cannot spill: 200,000 ids hold more than a megabyte.
+    let joined = "SELECT count(*) FROM wide a JOIN wide b ON a.id = b.id";
+    let (_, _, end) = collect(engine.sql(joined).run(|| {}));
+    let reason = end.unwrap_err();
+    assert!(
+        reason.contains("1048576 bytes of memory the engine allows")
+            && reason.contains("Engine::with_memory_limit"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_sort_larger_than_the_memory_limit_spills_and_finishes() {
+    // 4 million ids, 32 MB, sorted with 16 MiB allowed.
+    let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(0..4_000_000));
+    let ids = RecordBatch::try_from_iter([("id", ids)]).unwrap();
+    let batches: Vec<RecordBatch> = (0..ids.num_rows())
+        .step_by(65_536)
+        .map(|at| ids.slice(at, 65_536.min(ids.num_rows() - at)))
+        .collect();
+    let engine = Engine::with_threads(2)
+        .unwrap()
+        .with_memory_limit(16 << 20)
+        .unwrap();
+    engine
+        .register_batches("ids", &ids.schema(), &batches)
+        .unwrap();
+    let sorted = "SELECT id FROM ids ORDER BY id DESC";
+    let (_, batches, end) = collect(engine.sql(sorted).run(|| {}));
+    end.unwrap();
+    let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(rows, 4_000_000);
+    let first = batches[0].column(0).as_primitive::<Int64Type>().value(0);
+    assert_eq!(first, 3_999_999);
+}
