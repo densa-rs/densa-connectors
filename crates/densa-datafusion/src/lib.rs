@@ -13,6 +13,11 @@
 //! of each batch; string views are compacted first, so a filtered batch does not carry
 //! the bytes of the rows it dropped).
 //!
+//! A result too large to hold goes in densa's grid a page at a time: with the `paged`
+//! feature, `Engine::pages` makes a `densa_arrow::PageSource` of a query, each page a query
+//! of its own (`ORDER BY` the grid's sort and the keys given, `LIMIT`, `OFFSET`), counted with
+//! `count(*)`. [`Engine::schema`] gives a query's columns without running it.
+//!
 //! ```no_run
 //! use densa_datafusion::{Engine, QueryEvent};
 //!
@@ -36,5 +41,9 @@
 mod bridge;
 mod engine;
 mod numbers;
+#[cfg(feature = "paged")]
+mod pages;
 
 pub use engine::{Engine, EngineError, Query, QueryEvent, QueryStream};
+#[cfg(feature = "paged")]
+pub use pages::SqlPages;

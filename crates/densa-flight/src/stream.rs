@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,14 +11,11 @@ use std::time::Duration;
 
 use arrow_array::RecordBatch;
 use arrow_flight::error::FlightError;
-use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::{FlightClient, FlightDescriptor, FlightEndpoint, Location, Ticket};
+use arrow_flight::{FlightClient, FlightDescriptor, FlightEndpoint, Ticket};
 use arrow_schema::{Fields, Schema, SchemaRef};
 use futures::StreamExt;
-use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
-use tonic::transport::{Endpoint, Uri};
-use tonic::Code;
 
+use crate::client::{client, describe, headers, passing, places, Headers, Place, Target};
 use crate::numbers::RowNumbers;
 use crate::options::FlightRequest;
 use crate::{FlightOptions, RequestError};
@@ -54,18 +50,11 @@ pub enum FlightEvent {
 
 /// Events handed over ahead of the one taken: a slow taker holds the reading back.
 const QUEUED: usize = 256;
-/// How long opening a connection may take.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// HTTP/2 pings on a quiet connection, and how long one may go unanswered: a peer that
-/// vanished is noticed even while a stream waits for rows.
-const KEEP_ALIVE: Duration = Duration::from_secs(20);
 /// The longest the thread goes without looking at whether it should stop.
 const MAX_TICK: Duration = Duration::from_millis(100);
 /// How often a full queue is looked at again: the runtime keeps serving the connection
 /// (pings, flow control) meanwhile.
 const QUEUE_FULL_TICK: Duration = Duration::from_millis(2);
-/// The location that means "the connection this came from" (Flight 15+).
-const REUSE_CONNECTION: &str = "arrow-flight-reuse-connection:";
 
 /// An Arrow Flight result read on a thread of its own, its rows handed over as Arrow
 /// record batches: made by [`FlightOptions::connect`].
@@ -84,10 +73,7 @@ impl FlightStream {
         options: FlightOptions,
         wake: impl Fn() + Send + 'static,
     ) -> Result<Self, RequestError> {
-        let origin = Target::parse(&options.url).map_err(RequestError::InvalidUrl)?;
-        if origin.tls && cfg!(not(feature = "tls")) {
-            return Err(RequestError::TlsDisabled);
-        }
+        let origin = Target::origin(&options.url)?;
         let headers = headers(&options.headers)?;
         let (sender, events) = sync_channel(QUEUED);
         let stop = Arc::new(AtomicBool::new(false));
@@ -178,103 +164,6 @@ impl Drop for FlightStream {
     }
 }
 
-/// Where to connect: an `http://` or `https://` URI for tonic.
-#[derive(Debug, Clone)]
-struct Target {
-    uri: String,
-    tls: bool,
-    /// Host and port, lowercase: whether two targets are one service.
-    authority: String,
-}
-
-impl Target {
-    /// A Flight URL (`grpc://`, `grpc+tcp://`, `grpc+tls://`, `http://`, `https://`) with a
-    /// host and no credentials.
-    fn parse(url: &str) -> Result<Self, String> {
-        let (scheme, rest) = url
-            .split_once("://")
-            .ok_or_else(|| format!("{url} has no scheme"))?;
-        let tls = match scheme.to_ascii_lowercase().as_str() {
-            "grpc" | "grpc+tcp" | "http" => false,
-            "grpc+tls" | "https" => true,
-            _ => {
-                return Err(format!(
-                    "{url} is not grpc://, grpc+tls://, http:// or https://"
-                ))
-            }
-        };
-        let uri = format!("{}://{rest}", if tls { "https" } else { "http" });
-        let parsed: Uri = uri.parse().map_err(|error| format!("{url}: {error}"))?;
-        let authority = parsed.authority().map(|a| a.as_str()).unwrap_or_default();
-        if authority.contains('@') {
-            // A URL ends up in messages: credentials go in headers.
-            return Err("a Flight URL cannot hold credentials: give them as a header".to_owned());
-        }
-        let host = parsed.host().unwrap_or_default();
-        if host.is_empty() {
-            return Err(format!("{url} has no host"));
-        }
-        let port = parsed.port_u16().unwrap_or(if tls { 443 } else { 80 });
-        Ok(Self {
-            authority: format!("{}:{port}", host.to_ascii_lowercase()),
-            uri,
-            tls,
-        })
-    }
-}
-
-/// Where an endpoint's data can be read.
-enum Place {
-    /// The service the request went to.
-    Origin,
-    /// Another service.
-    At(Target),
-}
-
-/// The places an endpoint names, in the order given, or why it names none that can be used.
-fn places(locations: &[Location]) -> Result<Vec<Place>, String> {
-    if locations.is_empty() {
-        return Ok(vec![Place::Origin]);
-    }
-    let mut places = Vec::new();
-    let mut unusable = String::new();
-    for location in locations {
-        let reuse = location
-            .uri
-            .get(..REUSE_CONNECTION.len())
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(REUSE_CONNECTION));
-        if reuse {
-            places.push(Place::Origin);
-            continue;
-        }
-        match Target::parse(&location.uri) {
-            Ok(target) => places.push(Place::At(target)),
-            Err(reason) => unusable = reason,
-        }
-    }
-    if places.is_empty() {
-        return Err(format!("no usable location for an endpoint ({unusable})"));
-    }
-    Ok(places)
-}
-
-type Headers = Vec<(AsciiMetadataKey, AsciiMetadataValue)>;
-
-fn headers(given: &[(String, String)]) -> Result<Headers, RequestError> {
-    given
-        .iter()
-        .map(|(name, value)| {
-            let key = AsciiMetadataKey::from_bytes(name.as_bytes())
-                .map_err(|error| RequestError::InvalidHeader(format!("{name:?}: {error}")))?;
-            // The value stays out of the message: it is often a secret.
-            let value = AsciiMetadataValue::try_from(value.as_str()).map_err(|error| {
-                RequestError::InvalidHeader(format!("the value of {name}: {error}"))
-            })?;
-            Ok((key, value))
-        })
-        .collect()
-}
-
 /// Why a try ended without finishing.
 enum End {
     /// The stream was dropped.
@@ -301,21 +190,6 @@ impl End {
             Self::Fatal(reason)
         }
     }
-}
-
-/// Whether a call that ended with `code` may succeed when made again. A message over the
-/// size limit is `OutOfRange` (tonic's own check): it would be over again.
-fn passing(code: Code) -> bool {
-    matches!(
-        code,
-        Code::Unavailable
-            | Code::DeadlineExceeded
-            | Code::Aborted
-            | Code::Cancelled
-            | Code::Unknown
-            | Code::Internal
-            | Code::ResourceExhausted
-    )
 }
 
 /// The reading thread's state.
@@ -438,16 +312,13 @@ impl<W: Fn()> Reader<'_, W> {
         for place in places {
             let target = match place {
                 Place::Origin => self.origin.clone(),
-                // Data meant to be private does not go on in the clear.
-                Place::At(target) if self.origin.tls && !target.tls => {
-                    last = format!("{} is not TLS, unlike {}", target.uri, self.origin.uri);
-                    continue;
-                }
-                Place::At(target) if target.tls && cfg!(not(feature = "tls")) => {
-                    last = format!("{} needs the tls feature", target.uri);
-                    continue;
-                }
-                Place::At(target) => target,
+                Place::At(target) => match target.refused_after(&self.origin) {
+                    Some(reason) => {
+                        last = reason;
+                        continue;
+                    }
+                    None => target,
+                },
             };
             tried = true;
             match self.client(this, &target).await {
@@ -513,28 +384,20 @@ impl<W: Fn()> Reader<'_, W> {
         if this.clients.contains_key(&target.uri) {
             return Ok(());
         }
-        let endpoint = Endpoint::from_shared(target.uri.clone())
-            .map_err(|error| End::Fatal(describe(&target.uri, &error)))?
-            .connect_timeout(CONNECT_TIMEOUT)
-            .tcp_nodelay(true)
-            .http2_keep_alive_interval(KEEP_ALIVE)
-            .keep_alive_timeout(KEEP_ALIVE)
-            .keep_alive_while_idle(true);
-        let endpoint = secure(endpoint, target)?;
+        let endpoint = target.endpoint().map_err(End::Fatal)?;
         let channel = self.wait(endpoint.connect()).await?.map_err(|error| {
             End::Failed(describe(
                 &format!("cannot connect to {}", target.uri),
                 &error,
             ))
         })?;
-        let inner =
-            FlightServiceClient::new(channel).max_decoding_message_size(self.options.max_message);
-        let mut client = FlightClient::new_from_inner(inner);
-        if target.authority == self.origin.authority {
-            for (key, value) in &self.headers {
-                client.metadata_mut().insert(key.clone(), value.clone());
-            }
-        }
+        let client = client(
+            channel,
+            target,
+            &self.origin,
+            &self.headers,
+            self.options.max_message,
+        );
         this.clients.insert(target.uri.clone(), client);
         Ok(())
     }
@@ -594,15 +457,7 @@ fn descriptor(request: &FlightRequest) -> Result<FlightDescriptor, End> {
         FlightRequest::Path(path) => Ok(FlightDescriptor::new_path(path.clone())),
         FlightRequest::Command(command) => Ok(FlightDescriptor::new_cmd(command.clone())),
         #[cfg(feature = "sql")]
-        FlightRequest::Sql(query) => {
-            use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt};
-            use prost::Message;
-            let command = CommandStatementQuery {
-                query: query.clone(),
-                transaction_id: None,
-            };
-            Ok(FlightDescriptor::new_cmd(command.as_any().encode_to_vec()))
-        }
+        FlightRequest::Sql(query) => Ok(crate::client::statement(query)),
         #[cfg(feature = "sql")]
         FlightRequest::Tables { schemas } => {
             use arrow_flight::sql::{CommandGetTables, ProstMessageExt};
@@ -619,37 +474,4 @@ fn descriptor(request: &FlightRequest) -> Result<FlightDescriptor, End> {
         }
         FlightRequest::Ticket(_) => Err(End::Fatal("a ticket has no descriptor".to_owned())),
     }
-}
-
-/// `endpoint` with TLS when `target` asks for it.
-fn secure(endpoint: Endpoint, target: &Target) -> Result<Endpoint, End> {
-    if !target.tls {
-        return Ok(endpoint);
-    }
-    #[cfg(feature = "tls")]
-    {
-        let config = tonic::transport::ClientTlsConfig::new().with_webpki_roots();
-        endpoint
-            .tls_config(config)
-            .map_err(|error| End::Fatal(describe("TLS", &error)))
-    }
-    #[cfg(not(feature = "tls"))]
-    {
-        Err(End::Fatal(format!("{} needs the tls feature", target.uri)))
-    }
-}
-
-/// `what`, then `error` and every error under it (tonic's own messages say little).
-fn describe(what: &str, error: &dyn Error) -> String {
-    let mut text = format!("{what}: {error}");
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let cause_text = cause.to_string();
-        if !text.ends_with(&cause_text) {
-            text.push_str(": ");
-            text.push_str(&cause_text);
-        }
-        source = cause.source();
-    }
-    text
 }

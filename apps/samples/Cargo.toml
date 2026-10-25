@@ -20,6 +20,8 @@ tokio-stream = { version = "0.1", default-features = false, features = ["net"], 
 tonic = { workspace = true, optional = true }
 # Flight SQL's list of tables, decoded from the request (feature `flight`).
 prost = { version = "0.14", default-features = false, optional = true }
+# The Flight SQL service that runs statements (feature `flight-sql`).
+densa-datafusion = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Reads the schemas in the list of tables back.
@@ -35,6 +37,8 @@ flight = [
     "dep:tokio-stream",
     "dep:tonic",
 ]
+# A Flight SQL service that runs the statements it is given, with DataFusion.
+flight-sql = ["flight", "dep:densa-datafusion"]
 
 [lints]
 workspace = true

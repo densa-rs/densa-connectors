@@ -1,15 +1,20 @@
 //! Sample data the connector apps show: a service's web requests, the same rows whichever
-//! app makes them, so the demos agree, a local stream of sensor readings, and (feature
-//! `flight`) a local Arrow Flight service of the requests.
+//! app makes them, so the demos agree, a local stream of sensor readings, (feature `flight`)
+//! a local Arrow Flight service of the requests, and (feature `flight-sql`) a local Flight SQL
+//! service that runs statements over them with DataFusion.
 
 #[cfg(feature = "flight")]
 mod flight;
+#[cfg(feature = "flight-sql")]
+mod flight_sql;
 mod readings;
 
 #[cfg(feature = "flight")]
 pub use flight::{
     flight_server, flight_server_failing_once, flight_server_of, flight_server_without_schemas,
 };
+#[cfg(feature = "flight-sql")]
+pub use flight_sql::{flight_sql_server, flight_sql_server_of};
 pub use readings::{readings_server, SENSORS};
 
 use std::sync::Arc;

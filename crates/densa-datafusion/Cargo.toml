@@ -19,10 +19,20 @@ arrow-schema.workspace = true
 datafusion.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+# The `paged` feature: a query's rows a page at a time for densa's PagedModel.
+densa-arrow = { workspace = true, optional = true }
+
+[features]
+paged = ["dep:densa-arrow"]
 
 [dev-dependencies]
 arrow-select.workspace = true
 parquet.workspace = true
+# The `paged` tests: sort keys and the grid model's cells.
+densa-grid.workspace = true
+
+[package.metadata.docs.rs]
+features = ["paged"]
 
 [lints]
 workspace = true

@@ -14,6 +14,11 @@
 //! [`FlightOptions::retry`] asks again when one fails. TLS goes through rustls (the `tls`
 //! feature, on by default).
 //!
+//! A Flight SQL result too large to hold goes in densa's grid a page at a time: with the
+//! `paged` feature, `FlightOptions::paged` makes a `densa_arrow::PageSource` of a query, each
+//! page a statement the service runs (`ORDER BY` the grid's sort and the keys given, `LIMIT`,
+//! `OFFSET`), counted with `count(*)`.
+//!
 //! ```no_run
 //! use densa_flight::{FlightEvent, FlightOptions};
 //!
@@ -38,9 +43,14 @@
 //! # fn main() {}
 //! ```
 
+mod client;
 mod numbers;
 mod options;
+#[cfg(feature = "paged")]
+mod pages;
 mod stream;
 
 pub use options::{FlightOptions, RequestError};
+#[cfg(feature = "paged")]
+pub use pages::FlightPages;
 pub use stream::{FlightEvent, FlightStream};

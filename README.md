@@ -9,8 +9,9 @@ Connectors live apart from densa's core crates because the formats and protocols
 bring large dependency trees of their own.
 
 > **Status: 0.x, experimental.** These crates are not on crates.io yet (take them from this
-> repository). The apps use densa 0.2 from crates.io; the connectors themselves do not depend
-> on densa.
+> repository). The apps use densa from its main branch (the commit pinned in `Cargo.lock`)
+> until densa's next release; the connectors depend on densa only through their `paged`
+> features.
 
 ## Crates
 
@@ -18,8 +19,8 @@ bring large dependency trees of their own.
 |---|---|
 | [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready |
 | [`densa-ws`](crates/densa-ws) | WebSocket streams of JSON rows (columns given, or read from the first message) or Arrow IPC as record batches: rows gathered into batches, handed over within a set delay, reconnecting with growing waits and re-sending subscriptions, TLS through rustls |
-| [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands, SQL queries and a service's list of tables (with their schemas if asked), every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app |
-| [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped (needs Rust 1.94, DataFusion's minimum) |
+| [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands, SQL queries and a service's list of tables (with their schemas if asked), every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app; with the `paged` feature, a Flight SQL query a page at a time for densa's grid |
+| [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped; with the `paged` feature, a query a page at a time for densa's grid (needs Rust 1.94, DataFusion's minimum) |
 
 ## A file in a live table
 
@@ -170,6 +171,53 @@ engine.deregister("orders")?;
 engine.register_batches("orders", table.schema(), &batches)?;
 ```
 
+## A result too large to hold, a page at a time
+
+With the `paged` feature, `densa-datafusion` and `densa-flight` make a query a
+`densa_arrow::PageSource`: densa's `PagedModel` then shows it in the grid holding only the
+pages on screen, fetched on a thread of its own, and a click on a title sorts at the engine.
+
+```rust
+use densa_arrow::PagedModel;
+use densa_datafusion::Engine;
+use densa_flight::FlightOptions;
+
+fn models(wake: impl Fn() + Clone + Send + 'static) -> Result<[PagedModel; 2], Box<dyn std::error::Error>> {
+    // DataFusion over files: `id` tells rows apart, so pages keep one order.
+    let engine = Engine::new()?;
+    engine.register_parquet("trips", "trips.parquet")?;
+    let pages = engine.pages("SELECT * FROM trips", &["id"])?;
+    let local = PagedModel::new(pages.schema(), pages, wake.clone())?;
+
+    // A Flight SQL service runs each page's statement.
+    let pages = FlightOptions::sql("grpc+tls://flight.example.com:443", "SELECT * FROM trips")
+        .header("authorization", "Bearer <token>")
+        .paged(&["id"])?;
+    let remote = PagedModel::new(pages.schema(), pages, wake)?;
+    Ok([local, remote])
+}
+```
+
+Each page is a statement of its own, the query wrapped as `SELECT * FROM (query) AS densa_rows
+ORDER BY .. LIMIT .. OFFSET ..` (double-quoted names, `LIMIT` and `OFFSET`, as most SQL engines
+take them), and the count as `SELECT count(*) FROM (query) AS densa_rows`: so the query is one
+`SELECT` with nothing after it, and an `ORDER BY` of its own is not kept (DataFusion refuses
+it). Sort the model instead, as a click on a title does.
+
+The keys follow the grid's sort in every `ORDER BY`, so rows that tie keep one order from page
+to page. Without keys, DataFusion takes a query's own order only when the query reads as one
+stream (a file scan) and refuses the others; a Flight SQL service may change the order between
+pages.
+
+A page deep in a large result costs the engine a read of the result up to it, and an ordered
+page a sort of those rows, held in memory: fast for results of millions of rows, slower the
+deeper into billions. DataFusion's pages hold 2 GiB at most unless `SqlPages::with_memory_limit`
+says otherwise, past which a page fails, saying so; each Flight SQL call has five minutes unless
+`FlightOptions::call_timeout` says otherwise.
+
+The `paged` features need densa newer than 0.2.4: until its next release, take densa from its
+main branch with a `[patch.crates-io]` section, as this workspace's `Cargo.toml` does.
+
 ## Applications
 
 `file-viewer` opens a CSV or Parquet file in densa's live grid while the file loads: rows
@@ -228,6 +276,22 @@ cargo run --release -p sql-viewer -- --table trips=trips.parquet --table zones=z
 
 <p align="center">
   <img alt="A DataFusion query summarizing a million web requests by service and status in densa's grid, with the SQL in a text box above and the time it took in the status bar" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/sql-viewer.png" width="660">
+</p>
+
+`paged-viewer` pages through a SQL result too large to hold: only the rows on screen are
+fetched, from DataFusion over files or from a Flight SQL service, and a click on a title sorts
+at the engine; Refresh counts and fetches again.
+
+```
+cargo run --release -p paged-viewer -- --demo          # a million requests, paged by DataFusion
+cargo run --release -p paged-viewer -- --demo-flight   # the same, from a local Flight SQL service
+cargo run --release -p paged-viewer -- --table trips=trips.parquet --key id "SELECT * FROM trips"
+cargo run --release -p paged-viewer -- grpc://localhost:32010 --key id "SELECT * FROM trips" \
+    --header 'authorization:$FLIGHT_AUTH'
+```
+
+<p align="center">
+  <img alt="A million web requests from a Flight SQL service in densa's grid, a page at a time: sorted by ms, largest first, scrolled to row 532,854, with 11 pages of 256 rows held and a Refresh button" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/paged-viewer.png" width="660">
 </p>
 
 ## Next

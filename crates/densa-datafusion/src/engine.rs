@@ -33,20 +33,31 @@ const QUEUE_FULL_TICK: Duration = Duration::from_millis(2);
 /// that has one may use the engine from it too: registering blocks the calling thread but
 /// never panics there, and dropping never waits for the runtime's threads.
 pub struct Engine {
-    runtime: Arc<Workers>,
-    context: SessionContext,
+    pub(crate) runtime: Arc<Workers>,
+    pub(crate) context: SessionContext,
     threads: usize,
 }
 
 /// The runtime, shut down without waiting when its last owner goes: an engine or a query
 /// may be dropped from async code, where waiting for threads is not allowed.
-struct Workers(Option<Runtime>);
+pub(crate) struct Workers(Option<Runtime>);
 
 impl Workers {
     fn get(&self) -> Result<&Runtime, EngineError> {
         self.0
             .as_ref()
             .ok_or_else(|| EngineError::Runtime("the runtime has shut down".to_owned()))
+    }
+
+    /// Runs `future` on the runtime from a thread of its own, so the calling thread may be
+    /// inside an async runtime (where blocking on another would panic). `None` if it panicked.
+    pub(crate) fn block_on<F>(&self, future: F) -> Result<Option<F::Output>, EngineError>
+    where
+        F: Future + Send,
+        F::Output: Send,
+    {
+        let handle = self.get()?.handle().clone();
+        Ok(std::thread::scope(|scope| scope.spawn(move || handle.block_on(future)).join()).ok())
     }
 }
 
@@ -172,17 +183,44 @@ impl Engine {
         }
     }
 
-    /// Runs `future` on the runtime from a thread of its own, so the calling thread may be
-    /// inside an async runtime (where blocking on another would panic).
+    /// The columns `query` gives, without running it (planning reads the tables' schemas).
+    ///
+    /// # Errors
+    /// [`EngineError::Query`] if the query cannot be planned (bad SQL, an unknown table) or
+    /// would change things.
+    pub fn schema(&self, query: &str) -> Result<SchemaRef, EngineError> {
+        let context = self.context.clone();
+        let planning = async move {
+            let frame = context.sql_with_options(query, read_only()).await?;
+            Ok::<_, datafusion::error::DataFusionError>(frame.schema().inner().clone())
+        };
+        let schema = self
+            .runtime
+            .block_on(planning)?
+            .ok_or_else(|| EngineError::Query("planning panicked".to_owned()))?
+            .map_err(|error| EngineError::Query(error.to_string()))?;
+        schema_in(&schema).map_err(EngineError::Query)
+    }
+
+    /// Runs `future` on the runtime from a thread of its own (see `Workers::block_on`).
     fn block_on<F>(&self, future: F) -> Result<F::Output, EngineError>
     where
         F: Future + Send,
         F::Output: Send,
     {
-        let handle = self.runtime.get()?.handle().clone();
-        std::thread::scope(|scope| scope.spawn(move || handle.block_on(future)).join())
-            .map_err(|_| EngineError::Register("registering panicked".to_owned()))
+        self.runtime
+            .block_on(future)?
+            .ok_or_else(|| EngineError::Register("registering panicked".to_owned()))
     }
+}
+
+/// Options that keep a query from changing anything: no tables made or dropped, no files
+/// written, no settings changed.
+pub(crate) fn read_only() -> SQLOptions {
+    SQLOptions::new()
+        .with_allow_ddl(false)
+        .with_allow_dml(false)
+        .with_allow_statements(false)
 }
 
 /// A query about to run: made by [`Engine::sql`].
@@ -237,10 +275,7 @@ impl Query<'_> {
         let options = if self.changes {
             SQLOptions::new()
         } else {
-            SQLOptions::new()
-                .with_allow_ddl(false)
-                .with_allow_dml(false)
-                .with_allow_statements(false)
+            read_only()
         };
         let job = Job {
             query: self.query,
@@ -469,7 +504,7 @@ impl Drop for QueryStream {
     }
 }
 
-/// Why the engine could not start or take a table.
+/// Why the engine could not start, take a table or plan a query.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineError {
@@ -477,6 +512,9 @@ pub enum EngineError {
     Runtime(String),
     /// A table could not be registered.
     Register(String),
+    /// A query could not be planned (bad SQL, an unknown table or column), or would change
+    /// things where only reading is allowed.
+    Query(String),
 }
 
 impl fmt::Display for EngineError {
@@ -484,6 +522,7 @@ impl fmt::Display for EngineError {
         match self {
             Self::Runtime(reason) => write!(f, "cannot start the query runtime: {reason}"),
             Self::Register(reason) => write!(f, "cannot register the table: {reason}"),
+            Self::Query(reason) => write!(f, "cannot plan the query: {reason}"),
         }
     }
 }

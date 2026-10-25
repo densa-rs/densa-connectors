@@ -1,0 +1,23 @@
+[package]
+name = "paged-viewer"
+description = "Pages through a SQL result too large to hold in densa's grid: DataFusion over files or a Flight SQL service, a page at a time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# DataFusion 55's minimum.
+rust-version = "1.94"
+repository.workspace = true
+publish = false
+
+[dependencies]
+densa-arrow.workspace = true
+densa-datafusion = { workspace = true, features = ["paged"] }
+densa-flight = { workspace = true, features = ["paged"] }
+densa-grid.workspace = true
+densa-ui.workspace = true
+densa-widgets.workspace = true
+densa-window.workspace = true
+samples = { path = "../samples", features = ["flight-sql"] }
+
+[lints]
+workspace = true

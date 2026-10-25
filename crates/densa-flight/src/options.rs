@@ -39,6 +39,9 @@ pub struct FlightOptions {
     pub(crate) row_numbers: Option<String>,
     pub(crate) retry: Option<(Duration, Duration)>,
     pub(crate) max_message: usize,
+    /// How long a call of a query read a page at a time may take.
+    #[cfg(feature = "paged")]
+    pub(crate) call_timeout: Duration,
 }
 
 impl FlightOptions {
@@ -94,7 +97,20 @@ impl FlightOptions {
             row_numbers: None,
             retry: None,
             max_message: 64 << 20,
+            #[cfg(feature = "paged")]
+            call_timeout: Duration::from_secs(300),
         }
+    }
+
+    /// How long one call of a query read a page at a time (`FlightOptions::paged`) may take, 5
+    /// minutes unless set: its count, a page, or the first ask for its columns. A call past it
+    /// fails, saying so, and the model shows why. Streams have no such limit: they may never
+    /// end.
+    #[cfg(feature = "paged")]
+    #[must_use]
+    pub fn call_timeout(mut self, timeout: Duration) -> Self {
+        self.call_timeout = timeout.max(Duration::from_millis(1));
+        self
     }
 
     /// Adds a header to every call to the service at the URL (an `authorization` token,
@@ -164,11 +180,11 @@ impl fmt::Debug for FlightOptions {
             .field("row_numbers", &self.row_numbers)
             .field("retry", &self.retry)
             .field("max_message", &self.max_message)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// Why a Flight stream could not be started.
+/// Why reading a Flight service could not start: a stream, or a query read a page at a time.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RequestError {
@@ -178,8 +194,14 @@ pub enum RequestError {
     InvalidHeader(String),
     /// A TLS URL, without the `tls` feature that reads it.
     TlsDisabled,
-    /// The reading thread could not be started.
+    /// The reading thread (or a page source's runtime) could not be started.
     Io(std::io::Error),
+    /// Only a Flight SQL query is read a page at a time: the options were not made by
+    /// [`FlightOptions::sql`].
+    NotSql,
+    /// A query to read a page at a time could not be: the service could not be reached or
+    /// refused it, or a key is not one of its columns.
+    Query(String),
 }
 
 impl fmt::Display for RequestError {
@@ -188,7 +210,12 @@ impl fmt::Display for RequestError {
             Self::InvalidUrl(reason) => write!(f, "invalid Flight URL: {reason}"),
             Self::InvalidHeader(reason) => write!(f, "invalid header: {reason}"),
             Self::TlsDisabled => f.write_str("grpc+tls:// needs the tls feature"),
-            Self::Io(error) => write!(f, "could not start the stream: {error}"),
+            Self::Io(error) => write!(f, "could not start reading: {error}"),
+            Self::NotSql => f.write_str(
+                "only a Flight SQL query is read a page at a time: make the options with \
+                 FlightOptions::sql",
+            ),
+            Self::Query(reason) => write!(f, "cannot read the query a page at a time: {reason}"),
         }
     }
 }

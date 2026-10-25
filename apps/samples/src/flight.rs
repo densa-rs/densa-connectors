@@ -21,7 +21,7 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 const ENDPOINTS: i64 = 4;
-const BATCH: i64 = 16_384;
+pub(crate) const BATCH: i64 = 16_384;
 /// The ticket of the list of tables.
 const TABLES: &str = "tables";
 /// The ticket of the list of tables with their schemas.
@@ -78,7 +78,8 @@ pub fn flight_server_without_schemas(rows: i64) -> Result<String, Box<dyn Error>
     })
 }
 
-fn serve(requests: Requests) -> Result<String, Box<dyn Error>> {
+/// Serves `service` on a free local port, on a thread of its own; its URL.
+pub(crate) fn serve<S: FlightService>(service: S) -> Result<String, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -95,7 +96,7 @@ fn serve(requests: Requests) -> Result<String, Box<dyn Error>> {
                 };
                 let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
                 let served = Server::builder()
-                    .add_service(FlightServiceServer::new(requests))
+                    .add_service(FlightServiceServer::new(service))
                     .serve_with_incoming(incoming)
                     .await;
                 if let Err(error) = served {

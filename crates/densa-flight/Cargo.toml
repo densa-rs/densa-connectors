@@ -19,8 +19,12 @@ futures.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 prost = { version = "0.14", default-features = false, optional = true }
+# The `paged` feature: a Flight SQL query's rows a page at a time for densa's PagedModel.
+densa-arrow = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The `paged` tests: sort keys and the grid model's cells.
+densa-grid.workspace = true
 prost = { version = "0.14", default-features = false }
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
@@ -31,6 +35,11 @@ default = ["tls", "sql"]
 tls = ["arrow-flight/tls-ring", "arrow-flight/tls-webpki-roots"]
 # Flight SQL queries (FlightOptions::sql).
 sql = ["arrow-flight/flight-sql", "dep:prost"]
+# A Flight SQL query's rows a page at a time (FlightOptions::paged), for densa's PagedModel.
+paged = ["sql", "dep:densa-arrow", "tokio/rt-multi-thread"]
+
+[package.metadata.docs.rs]
+features = ["paged"]
 
 [lints]
 workspace = true

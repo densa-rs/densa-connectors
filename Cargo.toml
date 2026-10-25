@@ -45,12 +45,24 @@ densa-datafusion = { path = "crates/densa-datafusion", version = "0.1.0" }
 densa-files = { path = "crates/densa-files", version = "0.1.0" }
 densa-flight = { path = "crates/densa-flight", version = "0.1.0" }
 densa-ws = { path = "crates/densa-ws", version = "0.1.0" }
-# densa's crates, for the apps (the connectors themselves do not depend on densa).
-densa-arrow = "0.2.1"
-densa-data = "0.2.1"
-densa-ui = "0.2.1"
-densa-widgets = "0.2.1"
-densa-window = "0.2.1"
+# densa's crates, for the apps, and for the connectors' `paged` features (the connectors
+# themselves do not depend on densa).
+densa-arrow = "0.2.4"
+densa-data = "0.2.4"
+densa-grid = "0.2.4"
+densa-ui = "0.2.4"
+densa-widgets = "0.2.4"
+densa-window = "0.2.4"
+
+# densa from its main branch (the commit pinned in Cargo.lock) until the release with
+# PagedModel: page sources need it.
+[patch.crates-io]
+densa-arrow = { git = "https://github.com/densa-rs/densa" }
+densa-data = { git = "https://github.com/densa-rs/densa" }
+densa-grid = { git = "https://github.com/densa-rs/densa" }
+densa-ui = { git = "https://github.com/densa-rs/densa" }
+densa-widgets = { git = "https://github.com/densa-rs/densa" }
+densa-window = { git = "https://github.com/densa-rs/densa" }
 
 [workspace.lints.rust]
 missing_docs = "warn"

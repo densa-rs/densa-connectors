@@ -266,6 +266,34 @@ fn an_empty_result_still_has_its_schema() {
 }
 
 #[test]
+fn a_querys_columns_are_known_without_running_it() {
+    let engine = Engine::with_threads(1).unwrap();
+    let (schema, batches) = readings();
+    engine
+        .register_batches("readings", &schema, &batches)
+        .unwrap();
+    let columns = engine
+        .schema("SELECT site, avg(celsius) AS celsius FROM readings GROUP BY site")
+        .unwrap();
+    let names: Vec<&str> = columns.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(names, ["site", "celsius"]);
+    assert_eq!(columns.field(1).data_type(), &DataType::Float64);
+    for (query, expected) in [
+        ("SELECT * FROM nowhere", "nowhere"),
+        ("DROP TABLE readings", "DDL"),
+    ] {
+        match engine.schema(query) {
+            Err(EngineError::Query(reason)) => {
+                assert!(reason.contains(expected), "{query}: {reason}")
+            }
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+    let message = engine.schema("SELEC").unwrap_err().to_string();
+    assert!(message.starts_with("cannot plan the query: "), "{message}");
+}
+
+#[test]
 fn queries_that_cannot_run_fail_with_a_reason() {
     let engine = Engine::with_threads(1).unwrap();
     for (query, expected) in [
