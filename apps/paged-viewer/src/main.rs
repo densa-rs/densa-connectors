@@ -1,28 +1,34 @@
-//! Pages through a SQL result too large to hold, in densa's grid: only the rows on screen are
-//! fetched, a page at a time as you scroll, from DataFusion over files or from a Flight SQL
-//! service, and a click on a title sorts at the engine.
+//! Pages through data too large to hold, in densa's grid: only the rows on screen are fetched,
+//! a page at a time as you scroll, from a Parquet file, or from SQL with DataFusion over files
+//! or a Flight SQL service, where a click on a title sorts at the engine.
 //!
-//! `cargo run --release -p paged-viewer -- --table trips=trips.parquet --key id QUERY` runs the
-//! query with DataFusion (`--table name=path` for each Parquet or CSV file, a folder of Parquet
-//! files too); `cargo run --release -p paged-viewer -- grpc://HOST:PORT --key id QUERY` asks a
-//! Flight SQL service (`--header name:value` for each header; `name:$VAR` reads the value from
-//! an environment variable). `--key COLUMN`, once per column, names columns that tell rows
-//! apart, so pages keep one order. The query is one SELECT without an ORDER BY of its own:
-//! click a title to sort. `--demo` pages a million web requests with DataFusion,
-//! `--demo-flight` the same requests from a local Flight SQL service. `--light` for the light
-//! theme, `--seconds N` to close after N seconds. Refresh counts and fetches again.
+//! `cargo run --release -p paged-viewer -- trips.parquet` pages through a Parquet file in its
+//! own order, from anywhere in it. `cargo run --release -p paged-viewer -- --table
+//! trips=trips.parquet --key id QUERY` runs the query with DataFusion (`--table name=path` for
+//! each Parquet or CSV file, a folder of Parquet files too); `cargo run --release -p
+//! paged-viewer -- grpc://HOST:PORT --key id QUERY` asks a Flight SQL service (`--header
+//! name:value` for each header; `name:$VAR` reads the value from an environment variable).
+//! `--key COLUMN`, once per column, names columns that tell rows apart, so pages keep one
+//! order. The query is one SELECT without an ORDER BY of its own: click a title to sort.
+//! `--demo` pages a million web requests with DataFusion, `--demo-flight` the same requests
+//! from a local Flight SQL service, `--demo-file` from a Parquet file it writes first.
+//! `--light` for the light theme, `--seconds N` to close after N seconds. Refresh counts and
+//! fetches again.
 
 use std::error::Error;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use densa_arrow::{FetchError, PagedModel};
 use densa_datafusion::{Engine, SqlPages};
+use densa_files::{FileFormat, FilePages, OpenOptions};
 use densa_flight::{FlightOptions, FlightPages};
 use densa_grid::{Column, GridModel, SortOrder};
 use densa_ui::{Action, ActionKind, Align, Style, Theme, Ui, WidgetId};
 use densa_widgets::{Button, DataGrid, Label, Panel};
 use densa_window::{App, Host, WindowOptions};
+use samples::SampleFile;
 
 type Grid = DataGrid<PagedModel>;
 
@@ -32,6 +38,8 @@ const DEMO_KEY: &str = "request";
 
 /// Where the rows come from.
 enum Source {
+    /// A Parquet file, in its own order.
+    File(PathBuf),
     /// DataFusion over these tables: a name and a path each.
     Files(Vec<(String, String)>),
     /// DataFusion over the sample requests.
@@ -43,40 +51,54 @@ enum Source {
     },
 }
 
-/// The query's pages, from one engine or the other.
+/// The pages, from a file, one engine or the other.
 enum Pages {
+    File(FilePages),
     Sql(SqlPages),
     Flight(FlightPages),
 }
 
 impl Pages {
-    /// Plans the query (or asks the service for its columns): the slow part, done before the
-    /// window shows.
+    /// Reads the file's footer, plans the query or asks the service for its columns: the slow
+    /// part, done before the window shows.
     fn open(source: Source, query: &str, keys: &[String]) -> Result<Self, Box<dyn Error>> {
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-        if let Source::Flight { url, headers } = source {
-            let mut options = FlightOptions::sql(url, query);
-            for (name, value) in headers {
-                options = options.header(name, value);
+        let engine = match source {
+            Source::File(path) => {
+                let mut options = OpenOptions::new();
+                if FileFormat::from_path(&path).is_none() {
+                    // Parquet, unless the name says otherwise: some writers give files none.
+                    options = options.format(FileFormat::Parquet);
+                }
+                return Ok(Self::File(options.paged(path)?));
             }
-            return Ok(Self::Flight(options.paged(&keys)?));
-        }
-        let engine = Engine::new()?;
-        match source {
+            Source::Flight { url, headers } => {
+                let mut options = FlightOptions::sql(url, query);
+                for (name, value) in headers {
+                    options = options.header(name, value);
+                }
+                return Ok(Self::Flight(options.paged(&keys)?));
+            }
             Source::Files(tables) => {
+                let engine = Engine::new()?;
                 for (name, path) in &tables {
                     register(&engine, name, path)?;
                 }
+                engine
             }
-            Source::Requests => register_requests(&engine)?,
-            Source::Flight { .. } => {}
-        }
+            Source::Requests => {
+                let engine = Engine::new()?;
+                register_requests(&engine)?;
+                engine
+            }
+        };
         Ok(Self::Sql(engine.pages(query, &keys)?))
     }
 
     /// A model of the pages, `wake` called on its thread as they arrive.
     fn model(self, wake: impl Fn() + Send + 'static) -> std::io::Result<PagedModel> {
         match self {
+            Self::File(pages) => PagedModel::new(pages.schema(), pages, wake),
             Self::Sql(pages) => PagedModel::new(pages.schema(), pages, wake),
             Self::Flight(pages) => PagedModel::new(pages.schema(), pages, wake),
         }
@@ -307,11 +329,14 @@ struct Args {
     keys: Vec<String>,
     light: bool,
     seconds: Option<u64>,
+    /// The file the demo wrote, removed once the window closes.
+    sample: Option<SampleFile>,
 }
 
-const USAGE: &str = "usage: paged-viewer --table name=path... [--key COLUMN]... QUERY, or \
-                     paged-viewer URL [--header name:value|name:$VAR]... [--key COLUMN]... QUERY, \
-                     or --demo, or --demo-flight; [--light] [--seconds N]";
+const USAGE: &str = "usage: paged-viewer FILE.parquet, or paged-viewer --table name=path... \
+                     [--key COLUMN]... QUERY, or paged-viewer URL [--header name:value|name:$VAR]... \
+                     [--key COLUMN]... QUERY, or --demo, --demo-flight or --demo-file; [--light] \
+                     [--seconds N]";
 
 fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
     let mut tables = Vec::new();
@@ -352,6 +377,24 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
         keys: vec![DEMO_KEY.to_owned()],
         light,
         seconds,
+        sample: None,
+    };
+    let no_keys = || -> Result<(), Box<dyn Error>> {
+        match keys.is_empty() {
+            true => Ok(()),
+            false => Err("a file's rows come in its own order: --key is for queries".into()),
+        }
+    };
+    let file = |path: PathBuf, sample: Option<SampleFile>| -> Result<Args, Box<dyn Error>> {
+        no_keys()?;
+        Ok(Args {
+            query: path.display().to_string(),
+            source: Source::File(path),
+            keys: Vec::new(),
+            light,
+            seconds,
+            sample,
+        })
     };
     match free.as_slice() {
         ["--demo"] => return Ok(demo(Source::Requests)),
@@ -361,6 +404,12 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
                 url,
                 headers: Vec::new(),
             }));
+        }
+        ["--demo-file"] => {
+            // Refused before the file is written.
+            no_keys()?;
+            let sample = samples::requests_file()?;
+            return file(sample.path().to_owned(), Some(sample));
         }
         _ => {}
     }
@@ -373,6 +422,7 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
             headers,
         },
         [_] if !tables.is_empty() => Source::Files(tables),
+        [path] if names_a_file(path) => return file(PathBuf::from(path), None),
         _ => return Err(USAGE.into()),
     };
     let query = free.last().ok_or(USAGE)?.to_string();
@@ -382,7 +432,15 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
         keys,
         light,
         seconds,
+        sample: None,
     })
+}
+
+/// Whether a lone argument names a file rather than a query: it exists, or its extension names
+/// a format (a missing file is then said to be missing, not taken for SQL).
+fn names_a_file(arg: &str) -> bool {
+    let path = Path::new(arg);
+    path.exists() || FileFormat::from_path(path).is_some()
 }
 
 /// A header's value: `$NAME` reads the environment variable, so a token need not appear in the
@@ -404,6 +462,8 @@ fn main() {
 
 fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let args = parse(args)?;
+    // Removed when the run ends, whichever way.
+    let _sample = args.sample;
     let pages = Pages::open(args.source, &args.query, &args.keys)?;
     let viewer = Viewer {
         pages: Some(pages),
@@ -458,11 +518,17 @@ mod tests {
         assert!(matches!(demo.source, Source::Requests));
         assert_eq!((demo.query.as_str(), demo.seconds), (DEMO_QUERY, Some(3)));
         assert_eq!(demo.keys, [DEMO_KEY]);
+        let file = parse(&args(&["trips.parquet", "--light"])).unwrap();
+        assert!(matches!(&file.source, Source::File(path) if path == Path::new("trips.parquet")));
+        assert_eq!(file.query, "trips.parquet");
+        assert!(file.light && file.keys.is_empty());
         for wrong in [
             &["SELECT 1"][..],
             &["--table", "t=t.csv", "grpc://h:1", "SELECT 1"][..],
             &["--key"][..],
             &["grpc://h:1", "--header", "a:$DENSA_NOT_SET", "SELECT 1"][..],
+            &["trips.parquet", "--key", "id"][..],
+            &["--demo-file", "--key", "id"][..],
         ] {
             assert!(parse(&args(wrong)).is_err(), "{wrong:?}");
         }
@@ -512,6 +578,30 @@ mod tests {
             frames(&mut model, |m| m.is_fetched(0));
             assert_eq!(first_id(&model), (rows - 1).to_string());
         }
+    }
+
+    #[test]
+    fn the_file_demo_pages_through_the_requests_in_the_files_order() {
+        let sample = samples::requests_file().unwrap();
+        let pages = Pages::open(Source::File(sample.path().to_owned()), "", &[]).unwrap();
+        let mut model = pages.model(|| {}).unwrap();
+        frames(&mut model, |m| m.is_fetched(19));
+        assert_eq!(model.row_count(), Some(samples::REQUESTS as u64));
+        assert_eq!(first_id(&model), "0");
+        assert!(
+            !model.sort(0, SortOrder::Descending),
+            "the file's order only"
+        );
+        drop(model);
+        // A file whose name says no format is read as Parquet.
+        let bare = sample.path().with_extension("");
+        std::fs::copy(sample.path(), &bare).unwrap();
+        let opened = Pages::open(Source::File(bare.clone()), "", &[]);
+        let _ = std::fs::remove_file(&bare);
+        assert!(matches!(opened, Ok(Pages::File(pages)) if pages.total_rows() == 1_000_000));
+        let path = sample.path().to_owned();
+        drop(sample);
+        assert!(!path.exists(), "the sample file goes with its guard");
     }
 
     #[test]

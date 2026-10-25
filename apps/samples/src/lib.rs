@@ -1,14 +1,19 @@
 //! Sample data the connector apps show: a service's web requests, the same rows whichever
 //! app makes them, so the demos agree, a local stream of sensor readings, (feature `flight`)
-//! a local Arrow Flight service of the requests, and (feature `flight-sql`) a local Flight SQL
-//! service that runs statements over them with DataFusion.
+//! a local Arrow Flight service of the requests, (feature `flight-sql`) a local Flight SQL
+//! service that runs statements over them with DataFusion, and (feature `parquet`) the
+//! requests as a Parquet file.
 
+#[cfg(feature = "parquet")]
+mod file;
 #[cfg(feature = "flight")]
 mod flight;
 #[cfg(feature = "flight-sql")]
 mod flight_sql;
 mod readings;
 
+#[cfg(feature = "parquet")]
+pub use file::{requests_file, SampleFile};
 #[cfg(feature = "flight")]
 pub use flight::{
     flight_server, flight_server_failing_once, flight_server_of, flight_server_without_schemas,

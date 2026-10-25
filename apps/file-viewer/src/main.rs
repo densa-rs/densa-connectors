@@ -8,7 +8,6 @@
 //! light theme, `--seconds N` to close after N seconds.
 
 use std::error::Error;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,9 +17,6 @@ use densa_files::{Loader, OpenOptions};
 use densa_ui::{Action, Align, Style, Theme, Ui, WidgetId};
 use densa_widgets::{DataGrid, Label, Panel};
 use densa_window::{App, Host, WindowOptions};
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 
 /// The key column added when none is given.
 const ROW: &str = "row";
@@ -189,28 +185,6 @@ fn grouped(n: u64) -> String {
     text
 }
 
-/// Writes a million web requests (a service log) to a Parquet file in the temporary folder,
-/// returning its path.
-fn write_sample() -> Result<PathBuf, Box<dyn Error>> {
-    const BATCH: i64 = 65_536;
-    let name = format!("densa-sample-requests-{}.parquet", std::process::id());
-    let path = std::env::temp_dir().join(name);
-    let first = samples::requests(0, BATCH)?;
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .build();
-    let mut writer = ArrowWriter::try_new(File::create(&path)?, first.schema(), Some(properties))?;
-    writer.write(&first)?;
-    for start in (BATCH..samples::REQUESTS).step_by(65_536) {
-        writer.write(&samples::requests(
-            start,
-            (start + BATCH).min(samples::REQUESTS),
-        )?)?;
-    }
-    writer.close()?;
-    Ok(path)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let value = |flag: &str| -> Result<Option<String>, String> {
@@ -223,8 +197,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     let flags = ["--key", "--seconds"];
+    // The sample file, kept until the window closes, then removed.
+    let mut sample = None;
     let path = if args.iter().any(|a| a == "--sample") {
-        write_sample()?
+        let file = samples::requests_file()?;
+        let path = file.path().to_owned();
+        sample = Some(file);
+        path
     } else {
         let positional = args.iter().enumerate().find(|(i, a)| {
             !a.starts_with("--") && (*i == 0 || !flags.contains(&args[i - 1].as_str()))
@@ -257,5 +236,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         WindowOptions::new("densa file viewer").with_size(1100.0, 700.0),
         viewer,
     )?;
+    drop(sample);
     Ok(())
 }

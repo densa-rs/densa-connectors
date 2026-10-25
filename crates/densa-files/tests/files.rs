@@ -250,6 +250,13 @@ fn missing_and_broken_files_are_errors() {
     assert!(matches!(error, FileError::Invalid(_)), "{error:?}");
     assert!(error.to_string().starts_with("invalid file:"));
     assert!(std::error::Error::source(&error).is_none());
+    // A folder named like a file (as Spark writes them) says so.
+    let folder =
+        std::env::temp_dir().join(format!("densa-files-{}-folder.parquet", std::process::id()));
+    fs::create_dir_all(&folder).unwrap();
+    let error = open(&folder).unwrap_err();
+    let _ = fs::remove_dir(&folder);
+    assert!(matches!(error, FileError::Folder(_)), "{error:?}");
 }
 
 #[test]

@@ -15,8 +15,7 @@ densa-files.workspace = true
 densa-ui.workspace = true
 densa-widgets.workspace = true
 densa-window.workspace = true
-parquet.workspace = true
-samples = { path = "../samples" }
+samples = { path = "../samples", features = ["parquet"] }
 
 [lints]
 workspace = true

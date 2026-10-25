@@ -8,6 +8,11 @@
 //! ([`OpenOptions::row_numbers`]), a key for a `densa_data::LiveTable` when the file has
 //! none.
 //!
+//! A Parquet file too large to hold is read a page at a time instead (feature `paged`):
+//! `OpenOptions::paged` gives a `FilePages`, a `densa_arrow::PageSource` for densa's
+//! `PagedModel`, which reads only the rows the grid shows, from anywhere in the file, in the
+//! file's own order.
+//!
 //! Batches use Arrow 60, as densa's crates do, so they go into a live table, a grid or a
 //! chart without conversion. Parquet's compression codecs are features, all on by default:
 //! `snappy`, `gzip`, `lz4`, `zstd` and `brotli` (zstd builds C code; turn off what your
@@ -28,8 +33,12 @@
 
 mod error;
 mod loader;
+#[cfg(feature = "paged")]
+mod pages;
 mod reader;
 
 pub use error::FileError;
 pub use loader::Loader;
+#[cfg(feature = "paged")]
+pub use pages::FilePages;
 pub use reader::{open, FileFormat, FileReader, OpenOptions, MAX_BATCH_ROWS};

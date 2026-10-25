@@ -1,6 +1,6 @@
 [package]
 name = "paged-viewer"
-description = "Pages through a SQL result too large to hold in densa's grid: DataFusion over files or a Flight SQL service, a page at a time"
+description = "Pages through data too large to hold in densa's grid: a Parquet file, or SQL with DataFusion or a Flight SQL service, a page at a time"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,12 +12,13 @@ publish = false
 [dependencies]
 densa-arrow.workspace = true
 densa-datafusion = { workspace = true, features = ["paged"] }
+densa-files = { workspace = true, features = ["paged"] }
 densa-flight = { workspace = true, features = ["paged"] }
 densa-grid.workspace = true
 densa-ui.workspace = true
 densa-widgets.workspace = true
 densa-window.workspace = true
-samples = { path = "../samples", features = ["flight-sql"] }
+samples = { path = "../samples", features = ["flight-sql", "parquet"] }
 
 [lints]
 workspace = true

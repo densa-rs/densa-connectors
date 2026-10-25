@@ -16,6 +16,15 @@ arrow-array.workspace = true
 arrow-csv.workspace = true
 arrow-schema.workspace = true
 parquet.workspace = true
+# The `paged` feature: a Parquet file's rows a page at a time for densa's PagedModel.
+densa-arrow = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The `paged` tests: pages joined to compare with a whole read, the grid model's cells, and
+# the bytes a page reads.
+arrow-select.workspace = true
+bytes = "1"
+densa-grid.workspace = true
 
 [features]
 default = ["snappy", "gzip", "lz4", "zstd", "brotli"]
@@ -25,6 +34,11 @@ gzip = ["parquet/flate2-zlib-rs"]
 lz4 = ["parquet/lz4"]
 zstd = ["parquet/zstd"]
 brotli = ["parquet/brotli"]
+# A Parquet file's rows a page at a time (OpenOptions::paged), for densa's PagedModel.
+paged = ["dep:densa-arrow"]
+
+[package.metadata.docs.rs]
+features = ["paged"]
 
 [lints]
 workspace = true

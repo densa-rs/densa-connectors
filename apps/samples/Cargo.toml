@@ -22,6 +22,8 @@ tonic = { workspace = true, optional = true }
 prost = { version = "0.14", default-features = false, optional = true }
 # The Flight SQL service that runs statements (feature `flight-sql`).
 densa-datafusion = { workspace = true, optional = true }
+# The requests as a Parquet file (feature `parquet`).
+parquet = { workspace = true, features = ["snap"], optional = true }
 
 [dev-dependencies]
 # Reads the schemas in the list of tables back.
@@ -39,6 +41,8 @@ flight = [
 ]
 # A Flight SQL service that runs the statements it is given, with DataFusion.
 flight-sql = ["flight", "dep:densa-datafusion"]
+# The requests written to a Parquet file.
+parquet = ["dep:parquet"]
 
 [lints]
 workspace = true

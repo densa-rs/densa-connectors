@@ -2135,6 +2135,10 @@ dependencies = [
  "arrow-array 60.0.0",
  "arrow-csv 60.0.0",
  "arrow-schema 60.0.0",
+ "arrow-select 60.0.0",
+ "bytes",
+ "densa-arrow",
+ "densa-grid",
  "parquet 60.0.0",
 ]
 
@@ -2444,7 +2448,6 @@ dependencies = [
  "densa-ui",
  "densa-widgets",
  "densa-window",
- "parquet 60.0.0",
  "samples",
 ]
 
@@ -3999,6 +4002,7 @@ version = "0.1.0"
 dependencies = [
  "densa-arrow",
  "densa-datafusion",
+ "densa-files",
  "densa-flight",
  "densa-grid",
  "densa-ui",
@@ -4710,6 +4714,7 @@ dependencies = [
  "arrow-schema 60.0.0",
  "densa-datafusion",
  "futures",
+ "parquet 60.0.0",
  "prost",
  "tokio",
  "tokio-stream",

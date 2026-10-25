@@ -32,19 +32,42 @@ impl FileFormat {
             _ => None,
         }
     }
+
+    /// The format of the file at `path`: `format` if given, else the one its extension names.
+    ///
+    /// # Errors
+    /// [`FileError::Folder`] if `path` is a folder, [`FileError::UnknownFormat`] if no format
+    /// was given and the extension names none.
+    pub(crate) fn of(path: &Path, format: Option<Self>) -> Result<Self, FileError> {
+        if path.is_dir() {
+            return Err(FileError::Folder(path.to_owned()));
+        }
+        format
+            .or_else(|| Self::from_path(path))
+            .ok_or_else(|| FileError::UnknownFormat(path.to_owned()))
+    }
+}
+
+impl fmt::Display for FileFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Csv => "CSV",
+            Self::Parquet => "Parquet",
+        })
+    }
 }
 
 /// How to open a file: [`OpenOptions::new`], then the settings that differ, then
 /// [`open`](Self::open).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenOptions {
-    format: Option<FileFormat>,
+    pub(crate) format: Option<FileFormat>,
     batch_rows: usize,
     delimiter: Option<u8>,
     header: bool,
     infer_rows: usize,
     text: bool,
-    row_numbers: Option<String>,
+    pub(crate) row_numbers: Option<String>,
 }
 
 /// The most rows a batch holds: readers set aside room for a whole batch before reading it.
@@ -125,15 +148,13 @@ impl OpenOptions {
     ///
     /// # Errors
     /// [`FileError::UnknownFormat`] if no format was given and the extension names none,
-    /// [`FileError::Io`] if the file cannot be read, [`FileError::Invalid`] if it is not
-    /// valid in its format, [`FileError::DuplicateColumn`] if two columns have one name (or
-    /// the row number column's name is taken).
+    /// [`FileError::Folder`] if `path` is a folder, [`FileError::Io`] if the file cannot be
+    /// read, [`FileError::Invalid`] if it is not valid in its format,
+    /// [`FileError::DuplicateColumn`] if two columns have one name (or the row number
+    /// column's name is taken).
     pub fn open(&self, path: impl AsRef<Path>) -> Result<FileReader, FileError> {
         let path = path.as_ref();
-        let format = self
-            .format
-            .or_else(|| FileFormat::from_path(path))
-            .ok_or_else(|| FileError::UnknownFormat(path.to_owned()))?;
+        let format = FileFormat::of(path, self.format)?;
         let file = File::open(path)?;
         let (inner, schema, total_rows) = match format {
             FileFormat::Csv => self.open_csv(file, path)?,
@@ -209,7 +230,7 @@ impl OpenOptions {
 }
 
 /// The first name two columns of `schema` share.
-fn first_duplicate(schema: &Schema) -> Option<&str> {
+pub(crate) fn first_duplicate(schema: &Schema) -> Option<&str> {
     let fields = schema.fields();
     fields
         .iter()
@@ -242,13 +263,13 @@ enum Inner {
 
 /// The row number column being added: its schema, and the next number.
 #[derive(Debug)]
-struct RowNumbers {
-    schema: SchemaRef,
+pub(crate) struct RowNumbers {
+    pub(crate) schema: SchemaRef,
     next: u64,
 }
 
 impl RowNumbers {
-    fn new(name: &str, schema: &Schema) -> Result<Self, FileError> {
+    pub(crate) fn new(name: &str, schema: &Schema) -> Result<Self, FileError> {
         if schema.column_with_name(name).is_some() {
             return Err(FileError::DuplicateColumn(name.to_owned()));
         }
@@ -260,12 +281,23 @@ impl RowNumbers {
         })
     }
 
-    /// `batch` with its rows' numbers after its columns.
+    /// `batch` with its rows' numbers after its columns, numbering on from the last batch.
     fn add(&mut self, batch: &RecordBatch) -> Result<RecordBatch, FileError> {
+        let numbered = self.numbered(batch, self.next)?;
+        // Lossless: a batch holds fewer rows than u64 can count.
+        self.next += batch.num_rows() as u64;
+        Ok(numbered)
+    }
+
+    /// `batch` with its rows' numbers after its columns, its first row numbered `first`.
+    pub(crate) fn numbered(
+        &self,
+        batch: &RecordBatch,
+        first: u64,
+    ) -> Result<RecordBatch, FileError> {
         // Lossless: a batch holds fewer rows than u64 can count.
         let rows = batch.num_rows() as u64;
-        let numbers = UInt64Array::from_iter_values(self.next..self.next + rows);
-        self.next += rows;
+        let numbers = UInt64Array::from_iter_values(first..first + rows);
         let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
         columns.push(Arc::new(numbers));
         RecordBatch::try_new(self.schema.clone(), columns).map_err(invalid)

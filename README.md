@@ -17,7 +17,7 @@ bring large dependency trees of their own.
 
 | Crate | Use it for |
 |---|---|
-| [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready |
+| [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready; with the `paged` feature, a Parquet file of any size a page at a time for densa's grid, from anywhere in it |
 | [`densa-ws`](crates/densa-ws) | WebSocket streams of JSON rows (columns given, or read from the first message) or Arrow IPC as record batches: rows gathered into batches, handed over within a set delay, reconnecting with growing waits and re-sending subscriptions, TLS through rustls |
 | [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands, SQL queries and a service's list of tables (with their schemas if asked), every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app; with the `paged` feature, a Flight SQL query a page at a time for densa's grid |
 | [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped; with the `paged` feature, a query a page at a time for densa's grid (needs Rust 1.94, DataFusion's minimum) |
@@ -173,16 +173,22 @@ engine.register_batches("orders", table.schema(), &batches)?;
 
 ## A result too large to hold, a page at a time
 
-With the `paged` feature, `densa-datafusion` and `densa-flight` make a query a
-`densa_arrow::PageSource`: densa's `PagedModel` then shows it in the grid holding only the
-pages on screen, fetched on a thread of its own, and a click on a title sorts at the engine.
+With the `paged` feature, `densa-files` makes a Parquet file, and `densa-datafusion` and
+`densa-flight` a query, a `densa_arrow::PageSource`: densa's `PagedModel` then shows it in the
+grid holding only the pages on screen, fetched on a thread of its own. A click on a title sorts
+a query at the engine; a file keeps its own order.
 
 ```rust
 use densa_arrow::PagedModel;
 use densa_datafusion::Engine;
+use densa_files::OpenOptions;
 use densa_flight::FlightOptions;
 
-fn models(wake: impl Fn() + Clone + Send + 'static) -> Result<[PagedModel; 2], Box<dyn std::error::Error>> {
+fn models(wake: impl Fn() + Clone + Send + 'static) -> Result<[PagedModel; 3], Box<dyn std::error::Error>> {
+    // A Parquet file in its own order: each page read from the row groups that hold it.
+    let pages = OpenOptions::new().paged("trips.parquet")?;
+    let file = PagedModel::new(pages.schema(), pages, wake.clone())?;
+
     // DataFusion over files: `id` tells rows apart, so pages keep one order.
     let engine = Engine::new()?;
     engine.register_parquet("trips", "trips.parquet")?;
@@ -194,11 +200,20 @@ fn models(wake: impl Fn() + Clone + Send + 'static) -> Result<[PagedModel; 2], B
         .header("authorization", "Bearer <token>")
         .paged(&["id"])?;
     let remote = PagedModel::new(pages.schema(), pages, wake)?;
-    Ok([local, remote])
+    Ok([file, local, remote])
 }
 ```
 
-Each page is a statement of its own, the query wrapped as `SELECT * FROM (query) AS densa_rows
+A file is opened by reading its footer: its columns, its row groups and where their pages
+start. A page then reads the row groups that hold its rows, skipping the pages before them,
+so a page deep in a large file costs about what the first one does. Nothing of a page skipped
+is read when the file has an offset index (parquet-rs and Spark write one; pyarrow only with
+`write_page_index=True`); without one, its header is, or for a nested column (a list, a
+struct) the page itself. The file is opened for each read and not held in between, so a
+writer can replace it; a file written to is noticed, and its pages fail until Refresh counts
+again. CSV files have no index of their rows: load them whole, or query them with DataFusion.
+
+Each page of a query is a statement of its own, the query wrapped as `SELECT * FROM (query) AS densa_rows
 ORDER BY .. LIMIT .. OFFSET ..` (double-quoted names, `LIMIT` and `OFFSET`, as most SQL engines
 take them), and the count as `SELECT count(*) FROM (query) AS densa_rows`: so the query is one
 `SELECT` with nothing after it, and an `ORDER BY` of its own is not kept (DataFusion refuses
@@ -279,12 +294,14 @@ cargo run --release -p sql-viewer -- --table trips=trips.parquet --table zones=z
   <img alt="A DataFusion query summarizing a million web requests by service and status in densa's grid, with the SQL in a text box above and the time it took in the status bar" src="https://raw.githubusercontent.com/densa-rs/densa-connectors/main/docs/sql-viewer.png" width="660">
 </p>
 
-`paged-viewer` pages through a SQL result too large to hold: only the rows on screen are
-fetched, from DataFusion over files or from a Flight SQL service, and a click on a title sorts
-at the engine; Refresh counts and fetches again.
+`paged-viewer` pages through data too large to hold: only the rows on screen are fetched, from
+a Parquet file in its own order, or from SQL with DataFusion over files or a Flight SQL
+service, where a click on a title sorts at the engine; Refresh counts and fetches again.
 
 ```
-cargo run --release -p paged-viewer -- --demo          # a million requests, paged by DataFusion
+cargo run --release -p paged-viewer -- trips.parquet   # a Parquet file, from anywhere in it
+cargo run --release -p paged-viewer -- --demo-file     # a million requests, written to a file first
+cargo run --release -p paged-viewer -- --demo          # the same, paged by DataFusion
 cargo run --release -p paged-viewer -- --demo-flight   # the same, from a local Flight SQL service
 cargo run --release -p paged-viewer -- --table trips=trips.parquet --key id "SELECT * FROM trips"
 cargo run --release -p paged-viewer -- grpc://localhost:32010 --key id "SELECT * FROM trips" \
