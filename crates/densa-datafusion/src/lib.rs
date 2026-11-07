@@ -16,7 +16,10 @@
 //! A result too large to hold goes in densa's grid a page at a time: with the `paged`
 //! feature, `Engine::pages` makes a `densa_arrow::PageSource` of a query, each page a query
 //! of its own (`ORDER BY` the grid's sort and the keys given, `LIMIT`, `OFFSET`), counted with
-//! `count(*)`. [`Engine::schema`] gives a query's columns without running it.
+//! `count(*)`; and `Engine::sortable` makes one of a Parquet file read a page at a time
+//! (densa-files' `FilePages`), sorted by any column a click on a title names: the file is
+//! sorted once into a copy for that column, whose pages are then read as fast as the file's.
+//! [`Engine::schema`] gives a query's columns without running it.
 //!
 //! ```no_run
 //! use densa_datafusion::{Engine, QueryEvent};
@@ -43,7 +46,11 @@ mod engine;
 mod numbers;
 #[cfg(feature = "paged")]
 mod pages;
+#[cfg(feature = "paged")]
+mod sortable;
 
 pub use engine::{Engine, EngineError, Query, QueryEvent, QueryStream};
 #[cfg(feature = "paged")]
 pub use pages::SqlPages;
+#[cfg(feature = "paged")]
+pub use sortable::{SortablePages, Sorting, Sorts};

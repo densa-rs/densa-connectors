@@ -43,12 +43,17 @@ const MERGE_ROOM: usize = 10 << 20;
 /// [`Engine::with_threads`] to leave cores to the interface), so apps need none, and an app
 /// that has one may use the engine from it too: registering blocks the calling thread but
 /// never panics there, and dropping never waits for the runtime's threads.
+///
+/// A clone is another handle to the same engine: it shares the session (a table registered
+/// through one is seen by all) and the runtime, which stops when the last handle, query and
+/// page source is dropped.
+#[derive(Clone)]
 pub struct Engine {
     pub(crate) runtime: Arc<Workers>,
     pub(crate) context: SessionContext,
     threads: usize,
     /// The memory its queries may hold between them, if limited.
-    memory: Option<usize>,
+    pub(crate) memory: Option<usize>,
 }
 
 /// The runtime, shut down without waiting when its last owner goes: an engine or a query
@@ -197,15 +202,7 @@ impl Engine {
         let url = url.with_table_ref(table.clone());
         let context = self.context.clone();
         let registering = async move {
-            let schema = options.infer_schema(&context.state(), &url).await?;
-            let config = ListingTableConfig::new(url)
-                .with_listing_options(options)
-                .with_schema(schema);
-            let cache = context
-                .runtime_env()
-                .cache_manager
-                .get_file_statistic_cache();
-            let listing = ListingTable::try_new(config)?.with_cache(cache);
+            let listing = listing_table(&context, url, options).await?;
             context.register_table(table, Arc::new(listing))?;
             Ok::<(), DataFusionError>(())
         };
@@ -291,6 +288,24 @@ impl Engine {
             .block_on(future)?
             .ok_or_else(|| EngineError::Register("registering panicked".to_owned()))
     }
+}
+
+/// The table of the files at `url`, read as `options` say: their columns read from the files,
+/// their statistics kept in `context`'s cache.
+pub(crate) async fn listing_table(
+    context: &SessionContext,
+    url: ListingTableUrl,
+    options: ListingOptions,
+) -> Result<ListingTable, DataFusionError> {
+    let schema = options.infer_schema(&context.state(), &url).await?;
+    let config = ListingTableConfig::new(url)
+        .with_listing_options(options)
+        .with_schema(schema);
+    let cache = context
+        .runtime_env()
+        .cache_manager
+        .get_file_statistic_cache();
+    Ok(ListingTable::try_new(config)?.with_cache(cache))
 }
 
 /// Options that keep a query from changing anything: no tables made or dropped, no files
@@ -402,7 +417,7 @@ impl fmt::Debug for Engine {
 /// `path` as the text DataFusion takes. On Windows a verbatim path (`\\?\C:\data`, as
 /// `std::fs::canonicalize` gives) loses its prefix: DataFusion makes a URL of the path, and
 /// the URL parser panics on one.
-fn text(path: &Path) -> Result<String, EngineError> {
+pub(crate) fn text(path: &Path) -> Result<String, EngineError> {
     let text = path
         .to_str()
         .ok_or_else(|| EngineError::Register(format!("{} is not valid Unicode", path.display())))?;
@@ -415,7 +430,10 @@ fn text(path: &Path) -> Result<String, EngineError> {
 /// Where `path` is, for DataFusion: a URL made of the path itself, so a name with `*`, `?` or
 /// `[` is not taken for a pattern; and the end its files' names must have: none for a file
 /// (named, so read whatever its name ends in), `folder_extension` for the files of a folder.
-fn listed(path: &Path, folder_extension: &str) -> Result<(ListingTableUrl, String), EngineError> {
+pub(crate) fn listed(
+    path: &Path,
+    folder_extension: &str,
+) -> Result<(ListingTableUrl, String), EngineError> {
     let unreadable =
         |reason: String| EngineError::Register(format!("{}: {reason}", path.display()));
     let absolute = std::path::absolute(path).map_err(|error| unreadable(error.to_string()))?;

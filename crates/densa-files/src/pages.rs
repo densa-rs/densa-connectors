@@ -30,7 +30,8 @@ impl OpenOptions {
     /// skipped).
     ///
     /// The rows come in the file's own order: they cannot be sorted here, so a click on a
-    /// title does nothing (sort with SQL instead, as densa-datafusion's `Engine::pages` does).
+    /// title does nothing (densa-datafusion's `Engine::sortable` sorts them, by copies of the
+    /// file).
     /// [`row_numbers`](Self::row_numbers) numbers them from 0 through the whole file. The file
     /// is opened for each read and not held between reads, so a writer can replace it; a file
     /// written to is noticed, and its pages fail ([`FileError::Changed`]) until its rows are
@@ -100,6 +101,27 @@ impl FilePages {
     /// How many rows the file held when its footer was last read.
     pub fn total_rows(&self) -> u64 {
         self.footer.rows()
+    }
+
+    /// The column numbering the rows, if asked for ([`OpenOptions::row_numbers`]): the last of
+    /// the [`schema`](Self::schema).
+    pub fn row_numbers(&self) -> Option<&str> {
+        let numbers = self.numbers.as_ref()?;
+        numbers
+            .schema
+            .fields()
+            .last()
+            .map(|field| field.name().as_str())
+    }
+
+    /// Whether the file was written to since its footer was read: its pages fail until
+    /// [`reload`](Self::reload) reads it again. Only its length and times are looked at.
+    ///
+    /// # Errors
+    /// [`FileError::Io`] if it cannot be looked at (gone, or held by another).
+    pub fn is_changed(&self) -> Result<bool, FileError> {
+        let file = File::open(&self.path)?;
+        Ok(Stamp::of(&file)? != self.footer.stamp)
     }
 
     /// How many bytes its rows take uncompressed, as its footer says: closer than the file's

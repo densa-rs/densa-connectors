@@ -1,9 +1,11 @@
 //! Pages through data too large to hold, in densa's grid: only the rows on screen are fetched,
 //! a page at a time as you scroll, from a Parquet file, or from SQL with DataFusion over files
-//! or a Flight SQL service, where a click on a title sorts at the engine.
+//! or a Flight SQL service; a click on a title sorts.
 //!
-//! `cargo run --release -p paged-viewer -- trips.parquet` pages through a Parquet file in its
-//! own order, from anywhere in it. `cargo run --release -p paged-viewer -- --table
+//! `cargo run --release -p paged-viewer -- trips.parquet` pages through a Parquet file from
+//! anywhere in it, its rows numbered in `row`: a click on a title sorts it, the first time by a
+//! column making a copy of the file sorted by it (DataFusion, in the temporary folder), and
+//! `row`'s title gives back the file's order. `cargo run --release -p paged-viewer -- --table
 //! trips=trips.parquet --key id QUERY` runs the query with DataFusion (`--table name=path` for
 //! each Parquet or CSV file, a folder of Parquet files too); `cargo run --release -p
 //! paged-viewer -- grpc://HOST:PORT --key id QUERY` asks a Flight SQL service (`--header
@@ -21,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use densa_arrow::{FetchError, PagedModel};
-use densa_datafusion::{Engine, SqlPages};
-use densa_files::{FileFormat, FilePages, OpenOptions};
+use densa_datafusion::{Engine, SortablePages, Sorts, SqlPages};
+use densa_files::{FileError, FileFormat, FilePages, OpenOptions};
 use densa_flight::{FlightOptions, FlightPages};
 use densa_grid::{Column, GridModel, SortOrder};
 use densa_ui::{Action, ActionKind, Align, Style, Theme, Ui, WidgetId};
@@ -36,9 +38,13 @@ type Grid = DataGrid<PagedModel>;
 const DEMO_QUERY: &str = "SELECT * FROM requests";
 const DEMO_KEY: &str = "request";
 
+/// The memory DataFusion may hold while it sorts a file (past it, it spills to the temporary
+/// folder).
+const SORT_MEMORY: usize = 2 << 30;
+
 /// Where the rows come from.
 enum Source {
-    /// A Parquet file, in its own order.
+    /// A Parquet file, in its own order or sorted by copies of it.
     File(PathBuf),
     /// DataFusion over these tables: a name and a path each.
     Files(Vec<(String, String)>),
@@ -53,7 +59,7 @@ enum Source {
 
 /// The pages, from a file, one engine or the other.
 enum Pages {
-    File(FilePages),
+    File(Box<SortablePages>),
     Sql(SqlPages),
     Flight(FlightPages),
 }
@@ -70,7 +76,9 @@ impl Pages {
                     // Parquet, unless the name says otherwise: some writers give files none.
                     options = options.format(FileFormat::Parquet);
                 }
-                return Ok(Self::File(options.paged(path)?));
+                let file = numbered(&options, &path)?;
+                let engine = Engine::new()?.with_memory_limit(SORT_MEMORY)?;
+                return Ok(Self::File(Box::new(engine.sortable(file)?)));
             }
             Source::Flight { url, headers } => {
                 let mut options = FlightOptions::sql(url, query);
@@ -98,7 +106,7 @@ impl Pages {
     /// A model of the pages, `wake` called on its thread as they arrive.
     fn model(self, wake: impl Fn() + Send + 'static) -> std::io::Result<PagedModel> {
         match self {
-            Self::File(pages) => PagedModel::new(pages.schema(), pages, wake),
+            Self::File(pages) => PagedModel::new(pages.schema(), *pages, wake),
             Self::Sql(pages) => PagedModel::new(pages.schema(), pages, wake),
             Self::Flight(pages) => PagedModel::new(pages.schema(), pages, wake),
         }
@@ -107,6 +115,8 @@ impl Pages {
 
 struct Viewer {
     pages: Option<Pages>,
+    /// What a file's sorts are doing.
+    sorts: Option<Sorts>,
     query: String,
     light: bool,
     close_at: Option<Instant>,
@@ -132,10 +142,12 @@ struct Status {
     shown: Range<usize>,
     sort: Option<(usize, SortOrder)>,
     error: Option<FetchError>,
+    /// The column a sorted copy of the file is being made by, and for how many seconds.
+    making: Option<(String, u64)>,
 }
 
 impl Status {
-    fn of(grid: &Grid) -> Self {
+    fn of(grid: &Grid, sorts: Option<&Sorts>) -> Self {
         let model = grid.model();
         Self {
             rows: model.row_count(),
@@ -143,21 +155,29 @@ impl Status {
             shown: shown(grid),
             sort: grid.sort_order(),
             error: model.error().cloned(),
+            making: making(sorts),
         }
     }
 
     /// Whether `grid` would tell what this tells (comparing, not copying).
-    fn tells(&self, grid: &Grid) -> bool {
+    fn tells(&self, grid: &Grid, sorts: Option<&Sorts>) -> bool {
         let model = grid.model();
         self.rows == model.row_count()
             && self.pages == model.pages_held()
             && self.shown == shown(grid)
             && self.sort == grid.sort_order()
             && self.error.as_ref() == model.error()
+            && self.making == making(sorts)
     }
 
     /// The text, with the model's `columns` and `page_rows`.
     fn text(&self, columns: &[Column], page_rows: usize) -> String {
+        if let Some((column, seconds)) = &self.making {
+            return format!(
+                "Sorting the file by {column}: {seconds} s so far (the first sort by a column \
+                 makes a sorted copy of the file; its pages are then as quick as the file's)"
+            );
+        }
         if let Some(error) = &self.error {
             return error.to_string();
         }
@@ -191,6 +211,15 @@ impl Status {
     }
 }
 
+/// The column a sorted copy is being made by, and for how many whole seconds.
+fn making(sorts: Option<&Sorts>) -> Option<(String, u64)> {
+    let sorting = sorts?.making()?;
+    Some((
+        sorting.column().to_owned(),
+        sorting.since().elapsed().as_secs(),
+    ))
+}
+
 /// The rows on screen.
 fn shown(grid: &Grid) -> Range<usize> {
     let first = grid.first_row();
@@ -217,7 +246,18 @@ impl App for Viewer {
         }
         // The rows arrive on the model's thread: its wakes bring the frames that show them.
         let waker = host.waker();
-        let pages = self.pages.take().ok_or("the pages were taken")?;
+        let pages = match self.pages.take().ok_or("the pages were taken")? {
+            // While a file is sorted, no rows arrive: its own wakes keep the status going.
+            Pages::File(file) => {
+                let waker = host.waker();
+                let file = (*file).with_wake(move || {
+                    waker.wake();
+                });
+                self.sorts = Some(file.sorts());
+                Pages::File(Box::new(file))
+            }
+            pages => pages,
+        };
         let model = pages.model(move || {
             waker.wake();
         })?;
@@ -268,9 +308,18 @@ impl App for Viewer {
         };
         // What arrived since the last frame, so the status bar tells it in this one.
         ui.update::<Grid, _>(ids.grid, |grid, cx| grid.model_mut(cx).prepare());
+        let sorts = self.sorts.as_ref();
+        if let (Some(sorts), Some(grid)) = (sorts, ui.widget::<Grid>(ids.grid)) {
+            // A sorted copy the grid no longer shows is given up.
+            let schema = grid.model().schema();
+            let column = grid
+                .sort_order()
+                .and_then(|(column, _)| schema.fields().get(column));
+            sorts.showing(column.map(|field| field.name().as_str()));
+        }
         let text = match ui.widget::<Grid>(ids.grid) {
-            Some(grid) if !self.status.tells(grid) => {
-                self.status = Status::of(grid);
+            Some(grid) if !self.status.tells(grid, sorts) => {
+                self.status = Status::of(grid, sorts);
                 let model = grid.model();
                 Some(self.status.text(model.columns(), model.page_rows()))
             }
@@ -282,6 +331,18 @@ impl App for Viewer {
         // Frames come when pages arrive (their wakes) or the user acts; continuously only to
         // close by the clock.
         self.close_at.is_some()
+    }
+}
+
+/// The pages of the file at `path`, its rows numbered in `row` (`row_`, ... if it has a column
+/// of that name): the column whose title gives back the file's order once sorted.
+fn numbered(options: &OpenOptions, path: &Path) -> Result<FilePages, FileError> {
+    let mut name = "row".to_owned();
+    loop {
+        match options.clone().row_numbers(&name).paged(path) {
+            Err(FileError::DuplicateColumn(taken)) if taken == name => name.push('_'),
+            pages => return pages,
+        }
     }
 }
 
@@ -382,7 +443,7 @@ fn parse(args: &[String]) -> Result<Args, Box<dyn Error>> {
     let no_keys = || -> Result<(), Box<dyn Error>> {
         match keys.is_empty() {
             true => Ok(()),
-            false => Err("a file's rows come in its own order: --key is for queries".into()),
+            false => Err("a file's rows are told apart by their numbers (its row column): --key is for queries".into()),
         }
     };
     let file = |path: PathBuf, sample: Option<SampleFile>| -> Result<Args, Box<dyn Error>> {
@@ -467,6 +528,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let pages = Pages::open(args.source, &args.query, &args.keys)?;
     let viewer = Viewer {
         pages: Some(pages),
+        sorts: None,
         query: args.query,
         light: args.light,
         close_at: args
@@ -581,24 +643,29 @@ mod tests {
     }
 
     #[test]
-    fn the_file_demo_pages_through_the_requests_in_the_files_order() {
+    fn the_file_demo_pages_through_the_requests_and_sorts_them_by_a_copy() {
         let sample = samples::requests_file().unwrap();
         let pages = Pages::open(Source::File(sample.path().to_owned()), "", &[]).unwrap();
         let mut model = pages.model(|| {}).unwrap();
         frames(&mut model, |m| m.is_fetched(19));
         assert_eq!(model.row_count(), Some(samples::REQUESTS as u64));
         assert_eq!(first_id(&model), "0");
-        assert!(
-            !model.sort(0, SortOrder::Descending),
-            "the file's order only"
-        );
+        let row = model.schema().fields().len() - 1;
+        assert_eq!(model.schema().field(row).name(), "row");
+        assert!(model.sort(0, SortOrder::Descending));
+        frames(&mut model, |m| m.is_fetched(0));
+        assert_eq!(first_id(&model), (samples::REQUESTS - 1).to_string());
+        // The row numbers' title gives back the file's order.
+        assert!(model.sort(row, SortOrder::Ascending));
+        frames(&mut model, |m| m.is_fetched(0));
+        assert_eq!(first_id(&model), "0");
         drop(model);
         // A file whose name says no format is read as Parquet.
         let bare = sample.path().with_extension("");
         std::fs::copy(sample.path(), &bare).unwrap();
         let opened = Pages::open(Source::File(bare.clone()), "", &[]);
         let _ = std::fs::remove_file(&bare);
-        assert!(matches!(opened, Ok(Pages::File(pages)) if pages.total_rows() == 1_000_000));
+        assert!(matches!(opened, Ok(Pages::File(pages)) if pages.file().total_rows() == 1_000_000));
         let path = sample.path().to_owned();
         drop(sample);
         assert!(!path.exists(), "the sample file goes with its guard");

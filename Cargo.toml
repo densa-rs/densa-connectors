@@ -16,6 +16,7 @@ rust-version = "1.90"
 # Arrow 60, as densa uses: batches pass between the two without conversion.
 arrow-array = "60"
 arrow-buffer = "60"
+arrow-cast = "60"
 arrow-csv = "60"
 arrow-ipc = "60"
 arrow-json = "60"

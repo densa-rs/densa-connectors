@@ -19,7 +19,7 @@ bring large dependency trees of their own.
 | [`densa-files`](crates/densa-files) | CSV and Parquet files as record batches: CSV column types inferred, row numbers for a key, read on a background thread that wakes the interface as each batch is ready; with the `paged` feature, a Parquet file of any size a page at a time for densa's grid, from anywhere in it |
 | [`densa-ws`](crates/densa-ws) | WebSocket streams of JSON rows (columns given, or read from the first message) or Arrow IPC as record batches: rows gathered into batches, handed over within a set delay, reconnecting with growing waits and re-sending subscriptions, TLS through rustls |
 | [`densa-flight`](crates/densa-flight) | Arrow Flight and Flight SQL results as record batches: tickets, dataset paths, commands, SQL queries and a service's list of tables (with their schemas if asked), every endpoint read in order, row numbers for a key, optional retries for streams that never end; no async runtime needed in the app; with the `paged` feature, a Flight SQL query a page at a time for densa's grid |
-| [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped; with the `paged` feature, a query a page at a time for densa's grid (needs Rust 1.94, DataFusion's minimum) |
+| [`densa-datafusion`](crates/densa-datafusion) | SQL over Parquet files, CSV files and record batches with Apache DataFusion: results handed over as they are computed, row numbers for a key, queries cancelled when dropped; with the `paged` feature, a query a page at a time for densa's grid, and a Parquet file of any size sorted by any column, a sorted copy made once per column (needs Rust 1.94, DataFusion's minimum) |
 
 ## A file in a live table
 
@@ -181,7 +181,7 @@ engine.register_batches("orders", table.schema(), &batches)?;
 With the `paged` feature, `densa-files` makes a Parquet file, and `densa-datafusion` and
 `densa-flight` a query, a `densa_arrow::PageSource`: densa's `PagedModel` then shows it in the
 grid holding only the pages on screen, fetched on a thread of its own. A click on a title sorts
-a query at the engine; a file keeps its own order.
+a query at the engine; a file keeps its own order, unless `Engine::sortable` sorts it (below).
 
 ```rust
 use densa_arrow::PagedModel;
@@ -217,6 +217,31 @@ is read when the file has an offset index (parquet-rs and Spark write one; pyarr
 struct) the page itself. The file is opened for each read and not held in between, so a
 writer can replace it; a file written to is noticed, and its pages fail until Refresh counts
 again. CSV files have no index of their rows: load them whole, or query them with DataFusion.
+
+`Engine::sortable` makes a file's pages sortable by any column: the first page in a column's
+order has DataFusion read the file in parallel and write a copy of it sorted by that column
+(nulls last, rows of one value in the file's order, each keeping its number from the file), in
+the temporary folder unless `SortablePages::with_folder` says where. That takes a while once
+(seconds for each ten million rows or so; the sort spills to disk past the engine's memory
+limit), and its pages are then read as fast as the file's own, descending ones too (the copy
+read backwards). One copy is kept, replaced when another column is sorted by and removed with
+the pages; the row numbers' title gives back the file's order without one. `Sorts` tells the app
+which column is being sorted (`SortablePages::with_wake` brings frames for it meanwhile), and
+`Sorts::showing` gives up a sort the grid no longer shows.
+
+```rust
+use densa_arrow::PagedModel;
+use densa_datafusion::Engine;
+use densa_files::OpenOptions;
+
+fn sortable(wake: impl Fn() + Clone + Send + Sync + 'static) -> Result<PagedModel, Box<dyn std::error::Error>> {
+    let engine = Engine::new()?.with_memory_limit(2 << 30)?;
+    let file = OpenOptions::new().row_numbers("row").paged("trips.parquet")?;
+    let pages = engine.sortable(file)?.with_wake(wake.clone());
+    let sorts = pages.sorts(); // each frame: sorts.making(), and sorts.showing(the grid's sort column)
+    Ok(PagedModel::new(pages.schema(), pages, wake)?)
+}
+```
 
 Each page of a query is a statement of its own, the query wrapped as `SELECT * FROM (query) AS densa_rows
 ORDER BY .. LIMIT .. OFFSET ..` (double-quoted names, `LIMIT` and `OFFSET`, as most SQL engines
@@ -299,8 +324,10 @@ cargo run --release -p sql-viewer -- --table trips=trips.parquet --table zones=z
 </p>
 
 `paged-viewer` pages through data too large to hold: only the rows on screen are fetched, from
-a Parquet file in its own order, or from SQL with DataFusion over files or a Flight SQL
-service, where a click on a title sorts at the engine; Refresh counts and fetches again.
+a Parquet file (its rows numbered in `row`; a click on a title sorts it by a sorted copy, the
+status bar counting the seconds while one is made, and `row`'s title gives back the file's
+order), or from SQL with DataFusion over files or a Flight SQL service, where a click on a title
+sorts at the engine; Refresh counts and fetches again.
 
 ```
 cargo run --release -p paged-viewer -- trips.parquet   # a Parquet file, from anywhere in it

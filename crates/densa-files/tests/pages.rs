@@ -154,7 +154,12 @@ fn a_file_without_an_offset_index_gives_the_same_rows() {
 fn row_numbers_count_from_the_start_of_the_file() {
     let path = TempPath::new("numbered.parquet");
     write(&path.0, &rows(0..ROWS), true);
+    assert_eq!(
+        OpenOptions::new().paged(&path.0).unwrap().row_numbers(),
+        None
+    );
     let pages = OpenOptions::new().row_numbers("#").paged(&path.0).unwrap();
+    assert_eq!(pages.row_numbers(), Some("#"));
     let schema = pages.schema();
     assert_eq!(schema.fields().len(), 3);
     assert_eq!(schema.field(2).name(), "#");
@@ -266,7 +271,11 @@ fn a_file_written_to_is_noticed_and_read_anew_when_counted_again() {
     write(&path.0, &rows(0..ROWS), true);
     let mut pages = OpenOptions::new().paged(&path.0).unwrap();
     assert_eq!(ids(&pages.read(0, 3).unwrap()), [0, 1, 2]);
+    assert!(!pages.is_changed().unwrap());
     write(&path.0, &rows(5_000..5_500), true);
+    // Told without reading the file anew, as often as asked.
+    assert!(pages.is_changed().unwrap());
+    assert!(pages.is_changed().unwrap());
     let error = pages.read(0, 3).unwrap_err();
     assert!(
         matches!(&error, FileError::Changed(changed) if *changed == path.0),
@@ -282,6 +291,7 @@ fn a_file_written_to_is_noticed_and_read_anew_when_counted_again() {
     );
     // Counting again reads the file anew.
     assert_eq!(pages.row_count(&PageQuery::new()).unwrap(), 500);
+    assert!(!pages.is_changed().unwrap());
     assert_eq!(pages.total_rows(), 500);
     assert_eq!(ids(&pages.read(0, 3).unwrap()), [5_000, 5_001, 5_002]);
     assert_eq!(ids(&pages.read(497, 10).unwrap()), [5_497, 5_498, 5_499]);
@@ -331,6 +341,7 @@ fn a_file_rewritten_to_its_old_length_or_its_old_time_is_noticed_too() {
     set_modified(&path.0, time + Duration::from_secs(2));
     assert_eq!(fs::metadata(&path.0).unwrap().len(), length);
     assert!(matches!(pages.read(0, 3), Err(FileError::Changed(_))));
+    assert!(pages.is_changed().unwrap());
     // Fewer ids written at the old time: only the length moves.
     let pages = OpenOptions::new().paged(&path.0).unwrap();
     let time = modified(&path.0);
@@ -338,6 +349,10 @@ fn a_file_rewritten_to_its_old_length_or_its_old_time_is_noticed_too() {
     set_modified(&path.0, time);
     assert_eq!(modified(&path.0), time);
     assert!(matches!(pages.read(0, 3), Err(FileError::Changed(_))));
+    assert!(pages.is_changed().unwrap());
+    // Gone: it cannot be looked at.
+    fs::remove_file(&path.0).unwrap();
+    assert!(matches!(pages.is_changed(), Err(FileError::Io(_))));
 }
 
 /// On Unix, another file put in its place is another file, whatever its length and time.

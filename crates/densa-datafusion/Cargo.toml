@@ -21,11 +21,16 @@ futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 # A file's URL made from its path alone, for DataFusion's listing tables.
 url = "2"
-# The `paged` feature: a query's rows a page at a time for densa's PagedModel.
+# The `paged` feature: a query's rows a page at a time for densa's PagedModel, and a Parquet
+# file's, sorted by copies of it (the copy's text cast back to the file's types, descending
+# pages turned around).
 densa-arrow = { workspace = true, optional = true }
+densa-files = { workspace = true, optional = true, features = ["paged"] }
+arrow-cast = { workspace = true, optional = true }
+arrow-select = { workspace = true, optional = true }
 
 [features]
-paged = ["dep:densa-arrow"]
+paged = ["dep:densa-arrow", "dep:densa-files", "dep:arrow-cast", "dep:arrow-select"]
 
 [dev-dependencies]
 arrow-select.workspace = true

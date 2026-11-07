@@ -2111,11 +2111,13 @@ name = "densa-datafusion"
 version = "0.1.0"
 dependencies = [
  "arrow-array 60.0.0",
+ "arrow-cast 60.0.0",
  "arrow-ipc 60.0.0",
  "arrow-schema 60.0.0",
  "arrow-select 60.0.0",
  "datafusion",
  "densa-arrow",
+ "densa-files",
  "densa-grid",
  "futures",
  "parquet 60.0.0",
